@@ -1,0 +1,4 @@
+**/*
+!Dockerfile
+!wan22_bootstrap.sh
+!.github/**
