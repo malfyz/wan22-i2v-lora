@@ -22,7 +22,7 @@ fi
 # --- Ensure musubi-tuner is installed ---
 if [ ! -d "/workspace/musubi-tuner" ]; then
   echo "[BOOTSTRAP] Installing musubi-tuner..."
-  git clone https://github.com/musubi-ai/musubi-tuner.git /workspace/musubi-tuner
+  git clone https://github.com/kohya-ss/musubi-tuner.git /workspace/musubi-tuner
   pip install -e /workspace/musubi-tuner
 else
   echo "[BOOTSTRAP] musubi-tuner already exists."
