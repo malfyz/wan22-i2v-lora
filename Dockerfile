@@ -10,9 +10,11 @@ RUN apt-get update && apt-get install -y \
  && rm -rf /var/lib/apt/lists/*
 
 # --- Python dependencies ---
+# --- Python dependencies ---
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-        tensorboard matplotlib prompt-toolkit huggingface_hub accelerate opencv-python-headless gradio==4.44.0
+        tensorboard matplotlib prompt-toolkit huggingface_hub accelerate opencv-python-headless gradio==4.45.0
+
 
 EXPOSE 7860
 
