@@ -50,7 +50,7 @@ REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
 dl "$REPO" "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" "$MODELS_DIR/text_encoders"
 
 # VAE
-dl "$REPO" "vae/wan_2.1_vae.safetensors" "$MODELS_DIR/vae"
+dl "$REPO" "split_files/vae/wan_2.1_vae.safetensors" "$MODELS_DIR/vae"
 
 # I2V diffusion weights (fp16); the repack stores them under split_files then we move/rename as needed
 TMP_SPLIT="$WORKDIR/split_files/diffusion_models"
