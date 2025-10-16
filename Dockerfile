@@ -36,5 +36,3 @@ COPY app.py /workspace/app.py
 WORKDIR /workspace
 # No ENTRYPOINT — RunPod will call the start command
 
-# Start Gradio UI in background
-nohup python /workspace/app.py > /workspace/gradio.log 2>&1 &
