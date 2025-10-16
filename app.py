@@ -11,11 +11,10 @@ SCRIPTS = {
 }
 os.makedirs(LOG_DIR, exist_ok=True)
 
-PROCS = {}  # {"Train HN": Popen, "Train LN": Popen}
+PROCS = {}
 LOGFILES = {k: f"{LOG_DIR}/{k.replace(' ', '_').lower()}.log" for k in SCRIPTS}
 
 def _run_bg(name, cmd):
-    # write to dedicated logfile
     with open(LOGFILES[name], "w", buffering=1) as lf:
         lf.write(f"$ {cmd}\n")
         lf.flush()
@@ -37,7 +36,6 @@ def download_dataset(url):
     out = subprocess.run(["/bin/bash", "-lc", cmd], capture_output=True, text=True)
     if out.returncode != 0:
         return f"Download/Extract failed:\n{out.stderr or out.stdout}"
-    # Simple count
     count = len([p for p in glob.glob(f"{CHAR_DIR}/**/*", recursive=True)
                  if p.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))])
     return f"Dataset ready in {CHAR_DIR} with {count} images."
@@ -45,11 +43,9 @@ def download_dataset(url):
 def launch_job(name):
     if name not in SCRIPTS:
         return f"Unknown job: {name}"
-    # kill if already running
     if name in PROCS and PROCS[name].poll() is None:
         return f"{name} already running."
     cmd = f'{SCRIPTS[name]}'
-    # spawn background thread
     t = threading.Thread(target=_run_bg, args=(name, cmd), daemon=True)
     t.start()
     return f"Started: {name}"
@@ -86,7 +82,6 @@ def check_env():
         f"{WORKDIR}/models/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors",
     ]:
         checks.append(("✅" if os.path.exists(p) else "❌") + " " + p)
-    # dataset count
     n = len([p for p in glob.glob(f"{CHAR_DIR}/**/*", recursive=True)
              if p.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))])
     checks.append(f"📁 {CHAR_DIR} — {n} images")
@@ -99,7 +94,6 @@ with gr.Blocks(title="WAN 2.2 I2V LoRA Trainer") as demo:
         url = gr.Textbox(label="Dataset URL (zip or tar.*)", placeholder="https://example.com/dataset.zip")
         dl_btn = gr.Button("Download / Extract")
     dl_out = gr.Textbox(label="Dataset status", lines=3)
-
     dl_btn.click(download_dataset, inputs=url, outputs=dl_out)
 
     gr.Markdown("### Environment Check")
@@ -124,12 +118,9 @@ with gr.Blocks(title="WAN 2.2 I2V LoRA Trainer") as demo:
     ln_start.click(lambda: launch_job("Train LN"), outputs=ln_log)
     ln_stop.click(lambda: stop_job("Train LN"), outputs=ln_log)
 
-    # live tail refreshers
-    hn_log_timer = gr.Timer(2.0, fn=lambda l: tail_logs("Train HN", int(l)), inputs=hn_log_lines, outputs=hn_log)
-    ln_log_timer = gr.Timer(2.0, fn=lambda l: tail_logs("Train LN", int(l)), inputs=ln_log_lines, outputs=ln_log)
+    gr.Timer(2.0, fn=lambda l: tail_logs("Train HN", int(l)), inputs=hn_log_lines, outputs=hn_log)
+    gr.Timer(2.0, fn=lambda l: tail_logs("Train LN", int(l)), inputs=ln_log_lines, outputs=ln_log)
 
-# Optional simple auth via env var UI_TOKEN
-import os
 token = os.getenv("UI_TOKEN", "")
 if token:
     demo.launch(server_name="0.0.0.0", server_port=7860, auth=("admin", token))
