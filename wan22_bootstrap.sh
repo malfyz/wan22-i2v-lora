@@ -19,6 +19,15 @@ if [ -n "$HF_TOKEN" ]; then
   echo -n "$HF_TOKEN" > /root/.huggingface/token
 fi
 
+# --- Ensure musubi-tuner is installed ---
+if [ ! -d "/workspace/musubi-tuner" ]; then
+  echo "[BOOTSTRAP] Installing musubi-tuner..."
+  git clone https://github.com/musubi-ai/musubi-tuner.git /workspace/musubi-tuner
+  pip install -e /workspace/musubi-tuner
+else
+  echo "[BOOTSTRAP] musubi-tuner already exists."
+fi
+
 echo "[WAN22] Downloading models…"
 
 # downloader function
