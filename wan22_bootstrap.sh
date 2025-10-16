@@ -226,4 +226,11 @@ echo "Configs:   $WORKDIR/configs/dataset_i2v.json"
 echo "Scripts:   $WORKDIR/scripts/train_i2v_high.sh | train_i2v_low.sh"
 echo "============================================================"
 
+# ============================================================
+# Start Gradio web UI in background
+# ============================================================
+echo "[WAN22] Launching Gradio web UI on port 7860..."
+nohup python /workspace/app.py > /workspace/gradio.log 2>&1 &
+
+# Keep container alive for SSH/interactive use
 tail -f /dev/null
