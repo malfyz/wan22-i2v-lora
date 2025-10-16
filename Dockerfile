@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir tensorboard matplotlib prompt-toolkit huggingface_hub accelerate && \
     pip install --no-cache-dir opencv-python-headless
 
+RUN pip install --no-cache-dir gradio==4.44.0
+
+EXPOSE 7860
+
 # Create directories
 RUN mkdir -p /workspace/models/diffusion_models \
              /workspace/models/text_encoders \
