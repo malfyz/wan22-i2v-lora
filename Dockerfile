@@ -26,7 +26,7 @@ RUN mkdir -p /workspace/models/diffusion_models \
              /workspace/models/text_encoders \
              /workspace/models/vae \
              /workspace/datasets/character_images \
-             /workspace/datasets/val 
+             /workspace/datasets/val \
              /workspace/outputs \
              /workspace/cache \
              /workspace/scripts \
