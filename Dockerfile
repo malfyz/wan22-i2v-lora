@@ -3,34 +3,37 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
-# OS deps for OpenCV + media
+# --- OS dependencies for OpenCV + media ---
 RUN apt-get update && apt-get install -y \
     git git-lfs aria2 unzip zip rsync nano htop psmisc \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
-# Python deps (Torch already in base)
+# --- Python dependencies (Torch is already in base) ---
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir tensorboard matplotlib prompt-toolkit huggingface_hub accelerate && \
-    pip install --no-cache-dir opencv-python-headless
-
-RUN pip install --no-cache-dir gradio==4.44.0
+    pip install --no-cache-dir \
+        tensorboard matplotlib prompt-toolkit huggingface_hub accelerate opencv-python-headless gradio==4.44.0
 
 EXPOSE 7860
 
-# Create directories
+# --- Clone & install musubi-tuner ---
+RUN git clone https://github.com/musubi-ai/musubi-tuner.git /workspace/musubi-tuner && \
+    pip install -e /workspace/musubi-tuner && \
+    chmod -R 777 /workspace/musubi-tuner
+
+# --- Create directory structure ---
 RUN mkdir -p /workspace/models/diffusion_models \
              /workspace/models/text_encoders \
              /workspace/models/vae \
              /workspace/datasets/character_images \
-             /workspace/datasets/val \
+             /workspace/datasets/val 
              /workspace/outputs \
              /workspace/cache \
              /workspace/scripts \
              /workspace/configs \
              /root/.cache/huggingface/accelerate
 
-# Copy the bootstrap script
+# --- Copy bootstrap script ---
 COPY wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh
 RUN chmod +x /usr/local/bin/wan22_bootstrap.sh
 
