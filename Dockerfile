@@ -31,7 +31,7 @@ RUN mkdir -p /workspace/models/diffusion_models \
 # --- Copy bootstrap script ---
 COPY wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh
 RUN chmod +x /usr/local/bin/wan22_bootstrap.sh
-COPY app.py /workspace/app.py
+ADD app.py /workspace/app.py
 
 WORKDIR /workspace
 # No ENTRYPOINT — RunPod will call the start command
