@@ -9,17 +9,12 @@ RUN apt-get update && apt-get install -y \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
-# --- Python dependencies (Torch is already in base) ---
+# --- Python dependencies ---
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
         tensorboard matplotlib prompt-toolkit huggingface_hub accelerate opencv-python-headless gradio==4.44.0
 
 EXPOSE 7860
-
-# --- Clone & install musubi-tuner ---
-RUN git clone https://github.com/musubi-ai/musubi-tuner.git /workspace/musubi-tuner && \
-    pip install -e /workspace/musubi-tuner && \
-    chmod -R 777 /workspace/musubi-tuner
 
 # --- Create directory structure ---
 RUN mkdir -p /workspace/models/diffusion_models \
