@@ -37,9 +37,9 @@ dl() {
   if [ ! -f "$out/$(basename "$path")" ]; then
     echo "  - fetching $repo/$path → $out"
     if [ -n "$HF_TOKEN" ]; then
-      hf download "$repo" "$path" --local-dir "$out" --token "$HF_TOKEN" --resume
+      hf download "$repo" "$path" --local-dir "$out" --token "$HF_TOKEN" 
     else
-      hf download "$repo" "$path" --local-dir "$out" --resume
+      hf download "$repo" "$path" --local-dir "$out" 
     fi
   else
     echo "  - exists: $out/$(basename "$path")"
