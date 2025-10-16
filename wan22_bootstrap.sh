@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${HF_TOKEN:?Set HF_TOKEN in RunPod env (Template → Env Vars)}"
+if [ -n "$HF_TOKEN" ]; then
+  mkdir -p /root/.huggingface
+  echo -n "$HF_TOKEN" > /root/.huggingface/token
+fi
+
 DATASET_URL="${DATASET_URL:-}"
 
 export WORKDIR=/workspace
@@ -21,31 +25,46 @@ mkdir -p "$MODELS_DIR/diffusion_models" "$MODELS_DIR/text_encoders" "$MODELS_DIR
 mkdir -p /root/.huggingface && echo -n "$HF_TOKEN" > /root/.huggingface/token
 
 # Download models if missing (Comfy repack)
-need=0
-[ ! -f "$MODELS_DIR/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" ] && need=1
-[ ! -f "$MODELS_DIR/vae/wan_2.1_vae.safetensors" ] && need=1
-[ ! -f "$MODELS_DIR/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" ] && need=1
-[ ! -f "$MODELS_DIR/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors" ] && need=1
-if [ "$need" -eq 1 ]; then
-python - <<'PY'
-import os, subprocess, shutil
-tok=os.environ.get("HF_TOKEN","")
-MODELS=os.environ["MODELS_DIR"]; WORK=os.environ["WORKDIR"]
-def dl(repo, paths, dst):
-    os.makedirs(dst, exist_ok=True)
-    for p in paths:
-        subprocess.check_call(["huggingface-cli","download", repo, p, "--local-dir", dst, "--token", tok])
-repo="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
-dl(repo, ["text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors","vae/wan_2.1_vae.safetensors"], MODELS)
-dl(repo, ["split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors",
-          "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"], WORK)
-sf=os.path.join(WORK,"split_files","diffusion_models"); dst=os.path.join(MODELS,"diffusion_models")
-if os.path.isdir(sf):
-    for f in os.listdir(sf):
-        if f.endswith(".safetensors"):
-            shutil.move(os.path.join(sf,f), os.path.join(dst,f))
-PY
+echo "[WAN22] Downloading/validating required models..."
+
+set -e
+dl() {
+  # dl <repo> <path_in_repo> <local_dir>
+  local repo="$1"; shift
+  local path="$1"; shift
+  local out="$1"; shift
+  mkdir -p "$out"
+  if [ ! -f "$out/$(basename "$path")" ]; then
+    echo "  - fetching $repo/$path → $out"
+    if [ -n "$HF_TOKEN" ]; then
+      hf download "$repo" "$path" --local-dir "$out" --token "$HF_TOKEN" --resume
+    else
+      hf download "$repo" "$path" --local-dir "$out" --resume
+    fi
+  else
+    echo "  - exists: $out/$(basename "$path")"
+  fi
+}
+
+# Repackaged WAN 2.2 assets from Comfy-Org (public, no token needed)
+REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+
+# Text encoder (correct current filename)
+dl "$REPO" "text_encoders/models_t5_umt5-xxl-enc-bf16_fully_uncensored.safetensors" "$MODELS_DIR/text_encoders"
+
+# VAE
+dl "$REPO" "vae/wan_2.1_vae.safetensors" "$MODELS_DIR/vae"
+
+# I2V diffusers (fp16) — come under split_files in that repo; then we move them
+TMP_SPLIT="$WORKDIR/split_files/diffusion_models"
+dl "$REPO" "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" "$WORKDIR"
+dl "$REPO" "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"  "$WORKDIR"
+mkdir -p "$MODELS_DIR/diffusion_models"
+if [ -d "$TMP_SPLIT" ]; then
+  mv -f "$TMP_SPLIT/"*.safetensors "$MODELS_DIR/diffusion_models/" 2>/dev/null || true
 fi
+set +e
+
 
 # Optional: fetch dataset archive into /workspace/datasets/character_images
 if [ -n "$DATASET_URL" ]; then
@@ -147,3 +166,13 @@ echo "- Train HN: bash /workspace/scripts/train_i2v_high.sh"
 echo "- Train LN: bash /workspace/scripts/train_i2v_low.sh"
 echo "Outputs: HN -> $WORKDIR/outputs/i2v_high,  LN -> $WORKDIR/outputs/i2v_low"
 echo "============================================================"
+
+echo "============================================================"
+echo "READY: WAN 2.2 I2V trainer bootstrapped."
+echo "Models in: $MODELS_DIR"
+echo "Configs:   $WORKDIR/configs/dataset_i2v.json"
+echo "Scripts:   $WORKDIR/scripts/train_i2v_high.sh | train_i2v_low.sh"
+echo "============================================================"
+
+# Keep container alive for SSH/interactive use
+tail -f /dev/null
