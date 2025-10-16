@@ -96,50 +96,121 @@ cat > "$WORKDIR/configs/dataset_i2v.json" <<'JSON'
 }
 JSON
 
-# Write training scripts
+# --- Write training scripts ---
 TE="$MODELS_DIR/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 VAE="$MODELS_DIR/vae/wan_2.1_vae.safetensors"
 HN="$MODELS_DIR/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors"
 LN="$MODELS_DIR/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"
 
+# -------------------- HIGH NOISE --------------------
 cat > "$WORKDIR/scripts/train_i2v_high.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-M=/workspace/models; OUT=/workspace/outputs/i2v_high; CACHE=/workspace/cache/i2v_high; CONF=/workspace/configs/dataset_i2v.json
-mkdir -p "\$OUT" "\$CACHE"
-python /workspace/musubi-tuner/wan_cache_latents.py \
-  --dataset_config "\$CONF" --vae "$VAE" --i2v --output_dir "\$CACHE"
-python /workspace/musubi-tuner/wan_cache_text_encoder_outputs.py \
-  --dataset_config "\$CONF" --clip "$TE" --output_dir "\$CACHE"
-accelerate launch /workspace/musubi-tuner/wan_train_network.py \
-  --dataset_config "\$CONF" --model "$HN" --clip "$TE" --vae "$VAE" --output_dir "\$OUT" \
-  --network_module lora --rank 32 --learning_rate 1e-4 --train_batch_size 1 \
-  --gradient_accumulation_steps 4 --max_train_epochs 2 --mixed_precision bf16 --i2v \
-  --cache_latents_dir "\$CACHE" --cache_text_encoder_outputs_dir "\$CACHE" \
-  --enable_xformers --fp8_llm --blocks_to_swap 16
-echo "HN LoRA saved to \$OUT"
+
+M=/workspace/models
+OUT=/workspace/outputs/i2v_high
+CACHE=/workspace/cache/i2v_high
+CONF=/workspace/configs/dataset_i2v.json
+
+VAE="$M/vae/wan_2.1_vae.safetensors"
+TEXT_ENCODER="$M/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+MODEL="$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors"
+
+mkdir -p "$OUT" "$CACHE"
+
+echo "[HN] Caching latents..."
+python -m musubi_tuner.wan_cache_latents \
+  --dataset_config "$CONF" \
+  --vae "$VAE" \
+  --output_dir "$CACHE" \
+  --i2v
+
+echo "[HN] Caching text encoder outputs..."
+python -m musubi_tuner.wan_cache_text_encoder_outputs \
+  --dataset_config "$CONF" \
+  --text_encoder_path "$TEXT_ENCODER" \
+  --output_dir "$CACHE"
+
+echo "[HN] Starting LoRA training..."
+accelerate launch -m musubi_tuner.wan_train_network \
+  --model_path "$MODEL" \
+  --text_encoder_path "$TEXT_ENCODER" \
+  --vae_path "$VAE" \
+  --dataset_config "$CONF" \
+  --output_dir "$OUT" \
+  --network_module lora \
+  --rank 32 \
+  --learning_rate 1e-4 \
+  --train_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_train_epochs 2 \
+  --mixed_precision bf16 \
+  --i2v \
+  --cache_latents_dir "$CACHE" \
+  --cache_text_encoder_outputs_dir "$CACHE" \
+  --enable_xformers \
+  --fp8_llm \
+  --blocks_to_swap 16
+
+echo "[HN] Training complete. LoRA saved to $OUT"
 BASH
 chmod +x "$WORKDIR/scripts/train_i2v_high.sh"
 
+# -------------------- LOW NOISE --------------------
 cat > "$WORKDIR/scripts/train_i2v_low.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
-M=/workspace/models; OUT=/workspace/outputs/i2v_low; CACHE=/workspace/cache/i2v_low; CONF=/workspace/configs/dataset_i2v.json
-mkdir -p "\$OUT" "\$CACHE"
-python /workspace/musubi-tuner/wan_cache_latents.py \
-  --dataset_config "\$CONF" --vae "$VAE" --i2v --output_dir "\$CACHE"
-python /workspace/musubi-tuner/wan_cache_text_encoder_outputs.py \
-  --dataset_config "\$CONF" --clip "$TE" --output_dir "\$CACHE"
-accelerate launch /workspace/musubi-tuner/wan_train_network.py \
-  --dataset_config "\$CONF" --model "$LN" --clip "$TE" --vae "$VAE" --output_dir "\$OUT" \
-  --network_module lora --rank 32 --learning_rate 5e-5 --train_batch_size 1 \
-  --gradient_accumulation_steps 4 --max_train_epochs 2 --mixed_precision bf16 --i2v \
-  --cache_latents_dir "\$CACHE" --cache_text_encoder_outputs_dir "\$CACHE" \
-  --enable_xformers --fp8_llm --blocks_to_swap 16
-echo "LN LoRA saved to \$OUT"
+
+M=/workspace/models
+OUT=/workspace/outputs/i2v_low
+CACHE=/workspace/cache/i2v_low
+CONF=/workspace/configs/dataset_i2v.json
+
+VAE="$M/vae/wan_2.1_vae.safetensors"
+TEXT_ENCODER="$M/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+MODEL="$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"
+
+mkdir -p "$OUT" "$CACHE"
+
+echo "[LN] Caching latents..."
+python -m musubi_tuner.wan_cache_latents \
+  --dataset_config "$CONF" \
+  --vae "$VAE" \
+  --output_dir "$CACHE" \
+  --i2v
+
+echo "[LN] Caching text encoder outputs..."
+python -m musubi_tuner.wan_cache_text_encoder_outputs \
+  --dataset_config "$CONF" \
+  --text_encoder_path "$TEXT_ENCODER" \
+  --output_dir "$CACHE"
+
+echo "[LN] Starting LoRA training..."
+accelerate launch -m musubi_tuner.wan_train_network \
+  --model_path "$MODEL" \
+  --text_encoder_path "$TEXT_ENCODER" \
+  --vae_path "$VAE" \
+  --dataset_config "$CONF" \
+  --output_dir "$OUT" \
+  --network_module lora \
+  --rank 32 \
+  --learning_rate 5e-5 \
+  --train_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_train_epochs 2 \
+  --mixed_precision bf16 \
+  --i2v \
+  --cache_latents_dir "$CACHE" \
+  --cache_text_encoder_outputs_dir "$CACHE" \
+  --enable_xformers \
+  --fp8_llm \
+  --blocks_to_swap 16
+
+echo "[LN] Training complete. LoRA saved to $OUT"
 BASH
 chmod +x "$WORKDIR/scripts/train_i2v_low.sh"
 
+# -------------------- BOTH --------------------
 cat > "$WORKDIR/scripts/train_both.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
