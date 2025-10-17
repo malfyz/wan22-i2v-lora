@@ -21,7 +21,7 @@ PY
 echo "[BOOTSTRAP] Listing /workspace:"
 ls -la /workspace || true
 
-# Minimal runtime guard: ensure gradio is importable; if not, install once.
+# Ensure gradio is importable at runtime (guard in case runtime PATH differs)
 python - <<'PY' 2>/dev/null || (echo "[BOOTSTRAP] gradio missing at runtime; installing now..." && python -m pip install --no-cache-dir "gradio==4.45.0")
 import gradio
 print("[BOOTSTRAP] gradio version:", gradio.__version__)
