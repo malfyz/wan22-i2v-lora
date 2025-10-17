@@ -1,4 +1,16 @@
-# Dockerfile
+# syntax=docker/dockerfile:1.7
+
+#########################
+# Precheck (tiny, fast) #
+#########################
+FROM busybox:1.36 AS precheck
+# Fail fast if bootstrap isn't in the build context
+COPY wan22_bootstrap.sh /wan22_bootstrap.sh
+RUN test -f /wan22_bootstrap.sh
+
+#########################
+# Main runtime image    #
+#########################
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -27,19 +39,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Python toolchain ---
 RUN python -m pip install -U pip setuptools wheel typing_extensions "protobuf>=3.20,<5"
 
-# --- Core training/runtime deps (NO gradio, NO datasets to avoid pyarrow) ---
+# --- Core training/runtime deps (LEAN: no scipy, no matplotlib, no datasets/pyarrow) ---
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; return 1; }; \
   PKGS=( \
     "tensorboard==2.17.1" \
-    "matplotlib==3.9.2" \
     "prompt_toolkit==3.0.48" \
     "huggingface_hub[cli]==0.25.2" \
     "accelerate==1.1.1" \
     "opencv-python-headless==4.10.0.84" \
     "safetensors>=0.4.4" \
     "tqdm>=4.66.5" \
-    "scipy>=1.11.4" \
     "numpy>=1.26.4" \
     "transformers>=4.44.2" \
     "peft>=0.11.1" \
@@ -47,7 +57,9 @@ RUN set -e; \
   for PKG in "${PKGS[@]}"; do \
     echo "=== Installing $PKG ==="; \
     retry python -m pip install --prefer-binary --no-cache-dir "$PKG"; \
-  done
+  done \
+  && conda clean -afy || true \
+  && rm -rf /opt/conda/pkgs/* /root/.cache/pip || true
 
 # --- Musubi-Tuner (WAN 2.2 LoRA trainer) ---
 RUN cd /opt && git clone https://github.com/kohya-ss/musubi-tuner.git && \
@@ -57,8 +69,7 @@ RUN cd /opt && git clone https://github.com/kohya-ss/musubi-tuner.git && \
 COPY . /workspace
 
 # --- Install bootstrap to a stable path and also keep it in /workspace ---
-COPY wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh
-RUN test -f /usr/local/bin/wan22_bootstrap.sh || (echo "FATAL: wan22_bootstrap.sh missing from build context" && exit 1)
+COPY --from=precheck /wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh
 RUN dos2unix /usr/local/bin/wan22_bootstrap.sh || true
 RUN chmod +x /usr/local/bin/wan22_bootstrap.sh
 RUN if [ -f /workspace/wan22_bootstrap.sh ]; then dos2unix /workspace/wan22_bootstrap.sh || true; chmod +x /workspace/wan22_bootstrap.sh || true; fi
