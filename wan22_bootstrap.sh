@@ -11,24 +11,19 @@ PY
 
 echo "[BOOTSTRAP] PATH: $PATH"
 echo "[BOOTSTRAP] which python: $(which python)"
-echo "[BOOTSTRAP] pip path: $(python - <<'PY'
-import sys, os
-import site
-import pip
-print(pip.__file__)
-print(site.getsitepackages())
+echo "[BOOTSTRAP] pip site info:"
+python - <<'PY'
+import pip, site
+print("pip file:", pip.__file__)
+print("site-packages:", site.getsitepackages())
 PY
-)"
 
 echo "[BOOTSTRAP] Listing /workspace:"
 ls -la /workspace || true
 
 # Minimal runtime guard: ensure gradio is importable; if not, install once.
-if ! python - <<'PY' 2>/dev/null; then
-    echo "[BOOTSTRAP] gradio missing at runtime; installing now (one-time fallback)..."
-    python -m pip install --no-cache-dir "gradio==4.45.0"
-fi
-import gradio, sys
+python - <<'PY' 2>/dev/null || (echo "[BOOTSTRAP] gradio missing at runtime; installing now..." && python -m pip install --no-cache-dir "gradio==4.45.0")
+import gradio
 print("[BOOTSTRAP] gradio version:", gradio.__version__)
 PY
 
