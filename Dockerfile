@@ -1,7 +1,9 @@
 # Dockerfile
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
-ENV DEBIAN_FRONTEND=noninteractive \
+# Make sure conda python is first
+ENV PATH=/opt/conda/bin:$PATH \
+    DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DEFAULT_TIMEOUT=120 \
     GRADIO_SERVER_NAME=0.0.0.0 \
@@ -19,37 +21,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Use bash for RUN steps
 SHELL ["/bin/bash", "-lc"]
 
-# --- Keep pip toolchain current ---
-RUN python -m pip install -U pip setuptools wheel typing_extensions
+# --- Keep toolchain current (use conda's python explicitly) ---
+RUN /opt/conda/bin/python -m pip install -U pip setuptools wheel typing_extensions
+RUN /opt/conda/bin/python -m pip install "protobuf<5"
 
-# --- Pre-pin to avoid occasional tensorboard/protobuf resolver issues ---
-RUN python -m pip install "protobuf<5"
+# --- Python deps (install via conda python to avoid env mismatch) ---
+# Cache-busting arg: if you change this string, installs re-run.
+ARG PY_DEPS="tensorboard matplotlib prompt-toolkit huggingface_hub accelerate opencv-python-headless==4.10.0.84 gradio==4.45.0"
+RUN echo "$PY_DEPS" > /tmp/py_deps.txt && \
+    /opt/conda/bin/python -m pip install --prefer-binary --no-cache-dir $PY_DEPS
 
-# --- Python deps (install before source for better layer cache) ---
-RUN set -e; \
-  retry() { n=0; until [ $n -ge 3 ]; do "$@" && break; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; }; \
-  for PKG in \
-    "tensorboard" \
-    "matplotlib" \
-    "prompt-toolkit" \
-    "huggingface_hub" \
-    "accelerate" \
-    "opencv-python-headless==4.10.0.84" \
-    "gradio==4.45.0" \
-  ; do \
-    echo "=== Installing $PKG ==="; \
-    retry python -m pip install --prefer-binary --no-cache-dir "$PKG"; \
-  done
+# --- Validate at build-time (fail now if imports are broken) ---
+RUN /opt/conda/bin/python - <<'PY'
+import sys
+mods = ["gradio","cv2","accelerate","huggingface_hub","matplotlib","tensorboard","prompt_toolkit"]
+for m in mods:
+    __import__(m)
+print("OK imports:", mods)
+PY
 
-# --- Copy full repo into image ---
+# --- Copy your project ---
 COPY . /workspace
 
-# --- Put bootstrap in a stable, guaranteed location too ---
+# Also copy bootstrap to a stable path and mark executable
 RUN cp /workspace/wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh && \
     chmod +x /usr/local/bin/wan22_bootstrap.sh
 
-# Expose Gradio
+# Expose Gradio port
 EXPOSE 7860
 
-# Sanity: show what's inside /workspace at startup, then run bootstrap
-ENTRYPOINT ["/bin/bash","-lc","echo '[ENTRYPOINT] Listing /workspace:'; ls -la /workspace || true; /usr/local/bin/wan22_bootstrap.sh"]
+# Start: list /workspace then launch bootstrap
+ENTRYPOINT ["/bin/bash","-lc","echo '[ENTRYPOINT] /workspace listing:'; ls -la /workspace || true; /usr/local/bin/wan22_bootstrap.sh"]
