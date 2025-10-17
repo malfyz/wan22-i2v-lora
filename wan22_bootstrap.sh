@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "[WAN22] Bootstrap starting…"
 
-# --- Paths (can be overridden by env) ---
+# --- Paths (override via env if needed) ---
 WORKDIR="${WORKDIR:-/workspace}"
 MODELS_DIR="${MODELS_DIR:-/workspace/models}"
 DATASETS_DIR="${DATASETS_DIR:-/workspace/datasets}"
@@ -35,7 +35,7 @@ else
 fi
 echo "[WAN22] Using HF CLI: ${HF_BIN}"
 
-# Optional: login with token
+# Optional HF token
 if [[ -n "${HF_TOKEN:-}" ]]; then
   echo "[WAN22] Logging into Hugging Face with token (hidden)…"
   ${HF_BIN} login --token "${HF_TOKEN}" --add-to-git-credential no || true
@@ -43,11 +43,9 @@ else
   echo "[WAN22] HF_TOKEN not set — public downloads only."
 fi
 
-# --- Install Musubi-Tuner at runtime (inside the pod) ---
+echo "[WAN22] Installing Musubi-Tuner at runtime (on the pod)…"
 if [ ! -d /opt/musubi-tuner ]; then
-  echo "[WAN22] Installing Musubi-Tuner (runtime)…"
   git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner
-  # bitsandbytes & other heavy libs are installed here on the pod, not in CI
   python -m pip install --no-cache-dir -e /opt/musubi-tuner
 else
   echo "[WAN22] Musubi-Tuner already present."
@@ -55,8 +53,7 @@ fi
 
 echo "[WAN22] Downloading/validating required models…"
 
-# Helper: download a file if not present
-#   dl <repo> <path_in_repo> <local_dir>
+# Helper: dl <repo> <path_in_repo> <local_dir>
 dl() {
   local repo="$1"; shift
   local path="$1"; shift
@@ -75,16 +72,16 @@ dl() {
   fi
 }
 
-# === WAN 2.2 I2V: Comfy-Org repackaged assets ===
+# WAN 2.2 I2V: Comfy-Org repackaged assets (public)
 REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
 
 # Correct text encoder for WAN 2.2 I2V
 dl "$REPO" "text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" "${MODELS_DIR}/text_encoders"
 
-# VAE required by 14B I2V
+# VAE for 14B I2V
 dl "$REPO" "vae/wan_2.1_vae.safetensors" "${MODELS_DIR}/vae"
 
-# I2V diffusers (fp16) — under split_files; then move them
+# I2V diffusers (fp16) — live under split_files; then move them
 TMP_SPLIT="${WORKDIR}/split_files/diffusion_models"
 dl "$REPO" "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" "${WORKDIR}"
 dl "$REPO" "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"  "${WORKDIR}"
@@ -94,7 +91,7 @@ if [ -d "$TMP_SPLIT" ]; then
   mv -f "$TMP_SPLIT/"*.safetensors "${MODELS_DIR}/diffusion_models/" 2>/dev/null || true
 fi
 
-# --- Accelerate config (single GPU, bf16) ---
+# Accelerate config (single GPU, bf16)
 ACC_CONF="${HOME}/.cache/huggingface/accelerate/default_config.yaml"
 if [ ! -f "$ACC_CONF" ]; then
   mkdir -p "$(dirname "$ACC_CONF")"
@@ -109,7 +106,7 @@ main_training_function: main
 YAML
 fi
 
-# --- Minimal dataset config (edit as needed) ---
+# Minimal dataset config (edit as needed)
 CONF_JSON="$WORKDIR/configs/dataset_i2v.json"
 if [ ! -f "$CONF_JSON" ]; then
   cat > "$CONF_JSON" <<'JSON'
@@ -127,7 +124,7 @@ if [ ! -f "$CONF_JSON" ]; then
 JSON
 fi
 
-# --- Create training scripts (High-Noise / Low-Noise) using Musubi-Tuner ---
+# Training scripts (High/Low) via Musubi-Tuner
 HIGH_SH="$WORKDIR/scripts/train_i2v_high.sh"
 LOW_SH="$WORKDIR/scripts/train_i2v_low.sh"
 
@@ -224,12 +221,7 @@ BASH
 chmod +x "$LOW_SH"
 
 echo "[WAN22] Model & dataset bootstrap complete."
-echo "[WAN22] Summary:"
-echo "  - text encoders: $(ls -1 ${MODELS_DIR}/text_encoders | wc -l || true)"
-echo "  - vae:           $(ls -1 ${MODELS_DIR}/vae | wc -l || true)"
-echo "  - diffusers:     $(ls -1 ${MODELS_DIR}/diffusion_models | wc -l || true)"
 echo "[WAN22] Training scripts:"
 echo "  - bash /workspace/scripts/train_i2v_high.sh"
 echo "  - bash /workspace/scripts/train_i2v_low.sh"
-
 echo "[WAN22] Bootstrap finished (no UI)."
