@@ -9,6 +9,13 @@ ENV PATH=/opt/conda/bin:$PATH \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_PROGRESS_BAR=off
 
+# Runtime paths used by bootstrap
+ENV WORKDIR=/workspace \
+    MODELS_DIR=/workspace/models \
+    DATASETS_DIR=/workspace/datasets \
+    OUTPUTS_DIR=/workspace/outputs \
+    CACHE_DIR=/workspace/cache
+
 WORKDIR /workspace
 
 # --- OS deps ---
@@ -24,17 +31,16 @@ SHELL ["/bin/bash", "-lc"]
 # --- Python toolchain (conda python) ---
 RUN /opt/conda/bin/python -m pip install -U pip setuptools wheel typing_extensions
 
-# TensorBoard prefers protobuf<5 sometimes
-RUN /opt/conda/bin/python -m pip install "protobuf>=3.20,<5"
-
-# --- Training deps ONLY (NO GRADIO) ---
+# --- Training deps (NO GRADIO) ---
+# Install HF hub with CLI so 'hf' command exists
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; return 1; }; \
   PKGS=( \
+    "protobuf>=3.20,<5" \
     "tensorboard==2.17.1" \
     "matplotlib==3.9.2" \
     "prompt_toolkit==3.0.48" \
-    "huggingface_hub==0.25.2" \
+    "huggingface_hub[cli]==0.25.2" \
     "accelerate==1.1.1" \
     "opencv-python-headless==4.10.0.84" \
     "safetensors>=0.4.4" \
@@ -58,29 +64,4 @@ for m in mods:
 print("OK imports:", mods)
 PY
 
-# --- Copy your entire repo (keeps YOUR wan22_bootstrap.sh intact) ---
-COPY . /workspace
-
-# --- Add a wrapper that runs your bootstrap, then keeps the container alive ---
-RUN printf '%s\n' '#!/usr/bin/env bash' \
-    'set -euo pipefail' \
-    'echo "[STARTUP] Listing /workspace:"' \
-    'ls -la /workspace || true' \
-    '' \
-    '# Run your project bootstrap (models/datasets setup). Do NOT fail the container if it errors late.' \
-    'if [ -x /workspace/wan22_bootstrap.sh ]; then' \
-    '  echo "[STARTUP] Running /workspace/wan22_bootstrap.sh..."' \
-    '  /workspace/wan22_bootstrap.sh || echo "[STARTUP] wan22_bootstrap.sh exited with non-zero (continuing so SSH works)."' \
-    'else' \
-    '  echo "[STARTUP] WARNING: /workspace/wan22_bootstrap.sh not found or not executable."' \
-    'fi' \
-    '' \
-    'echo "[STARTUP] Keeping container alive for SSH…"' \
-    'while true; do sleep 3600; done' \
-    > /usr/local/bin/startup.sh && chmod +x /usr/local/bin/startup.sh
-
-# Default workdir
-WORKDIR /workspace
-
-# Keep the container alive after running your bootstrap so SSH always works
-ENTRYPOINT ["/bin/bash","-lc","/usr/local/bin/startup.sh"]
+# --- Copy your entire repo (keeps YOUR wan22_bootstrap._
