@@ -1,24 +1,38 @@
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=120
+
 WORKDIR /workspace
 
-# --- OS dependencies for OpenCV + media ---
+# --- OS deps ---
 RUN apt-get update && apt-get install -y \
     git git-lfs aria2 unzip zip rsync nano htop psmisc \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-# --- Python dependencies ---
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir \
-        tensorboard \
-        matplotlib \
-        prompt-toolkit \
-        huggingface_hub \
-        accelerate \
-        opencv-python-headless \
-        gradio==4.45.0
+# --- Python base tooling first (helps wheels resolve cleanly) ---
+RUN python -m pip install -U pip setuptools wheel typing_extensions
+
+# --- Install Python deps one-by-one with retries so we see which fails ---
+# Also keeps the Dockerfile syntax simple (no tricky continuations).
+RUN bash -lc '\
+  set -e; \
+  for PKG in \
+    "tensorboard" \
+    "matplotlib" \
+    "prompt-toolkit" \
+    "huggingface_hub" \
+    "accelerate" \
+    "opencv-python-headless" \
+    "gradio==4.45.0" \
+  ; do \
+    echo "=== Installing $PKG ==="; \
+    python -m pip install --prefer-binary "$PKG" || \
+    (echo "Retry 1: $PKG" && sleep 5 && python -m pip install --prefer-binary "$PKG") || \
+    (echo "Retry 2: $PKG" && sleep 10 && python -m pip install --prefer-binary "$PKG"); \
+  done'
 
 EXPOSE 7860
 
@@ -35,11 +49,10 @@ RUN mkdir -p \
     /workspace/configs \
     /root/.cache/huggingface/accelerate
 
-# --- Copy bootstrap + app files ---
+# --- Copy bootstrap + app ---
 COPY wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh
 COPY app.py /workspace/app.py
 RUN chmod +x /usr/local/bin/wan22_bootstrap.sh
 
 WORKDIR /workspace
-
-# No ENTRYPOINT — RunPod will call the start command
+# Start command remains in your RunPod template; bootstrap launches Gradio.
