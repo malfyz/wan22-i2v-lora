@@ -1,7 +1,7 @@
 # Dockerfile
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
-# Use conda's python/pip everywhere
+# Always use conda's python/pip
 ENV PATH=/opt/conda/bin:$PATH \
     DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -24,11 +24,10 @@ SHELL ["/bin/bash", "-lc"]
 # --- Python toolchain (conda python) ---
 RUN /opt/conda/bin/python -m pip install -U pip setuptools wheel typing_extensions
 
-# TensorBoard sometimes prefers protobuf<5
+# TensorBoard prefers protobuf<5 sometimes
 RUN /opt/conda/bin/python -m pip install "protobuf>=3.20,<5"
 
-# --- Python deps (NO GRADIO) ---
-# We install one-by-one with retries so failures are obvious.
+# --- Training deps ONLY (NO GRADIO) ---
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; return 1; }; \
   PKGS=( \
@@ -48,11 +47,7 @@ RUN set -e; \
   ); \
   for PKG in "${PKGS[@]}"; do \
     echo "=== Installing $PKG ==="; \
-    if ! retry /opt/conda/bin/python -m pip install --prefer-binary --no-cache-dir "$PKG" 2>&1 | tee "/tmp/pip_${PKG//[^A-Za-z0-9._-]/_}.log"; then \
-      echo "----- PIP LOG (tail) for $PKG -----"; \
-      tail -n 200 "/tmp/pip_${PKG//[^A-Za-z0-9._-]/_}.log" || true; \
-      echo "FAILED: $PKG"; exit 1; \
-    fi; \
+    retry /opt/conda/bin/python -m pip install --prefer-binary --no-cache-dir "$PKG"; \
   done
 
 # --- Quick import sanity (no Gradio) ---
@@ -63,22 +58,29 @@ for m in mods:
 print("OK imports:", mods)
 PY
 
-# --- Copy your project into the image ---
+# --- Copy your entire repo (keeps YOUR wan22_bootstrap.sh intact) ---
 COPY . /workspace
 
-# --- Create a tiny keepalive so the container never exits (SSH can attach) ---
+# --- Add a wrapper that runs your bootstrap, then keeps the container alive ---
 RUN printf '%s\n' '#!/usr/bin/env bash' \
     'set -euo pipefail' \
-    'echo "[KEEPALIVE] Container up. $(date)";' \
-    'echo "[KEEPALIVE] Python: $(python --version)";' \
-    'echo "[KEEPALIVE] Listing /workspace:";' \
+    'echo "[STARTUP] Listing /workspace:"' \
     'ls -la /workspace || true' \
-    'echo "[KEEPALIVE] Sleeping..."' \
+    '' \
+    '# Run your project bootstrap (models/datasets setup). Do NOT fail the container if it errors late.' \
+    'if [ -x /workspace/wan22_bootstrap.sh ]; then' \
+    '  echo "[STARTUP] Running /workspace/wan22_bootstrap.sh..."' \
+    '  /workspace/wan22_bootstrap.sh || echo "[STARTUP] wan22_bootstrap.sh exited with non-zero (continuing so SSH works)."' \
+    'else' \
+    '  echo "[STARTUP] WARNING: /workspace/wan22_bootstrap.sh not found or not executable."' \
+    'fi' \
+    '' \
+    'echo "[STARTUP] Keeping container alive for SSH…"' \
     'while true; do sleep 3600; done' \
-    > /usr/local/bin/keepalive.sh && chmod +x /usr/local/bin/keepalive.sh
+    > /usr/local/bin/startup.sh && chmod +x /usr/local/bin/startup.sh
 
-# Default working dir
+# Default workdir
 WORKDIR /workspace
 
-# Keep container running for SSH
-ENTRYPOINT ["/bin/bash","-lc","/usr/local/bin/keepalive.sh"]
+# Keep the container alive after running your bootstrap so SSH always works
+ENTRYPOINT ["/bin/bash","-lc","/usr/local/bin/startup.sh"]
