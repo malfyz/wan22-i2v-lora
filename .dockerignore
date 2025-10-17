@@ -1,4 +1,3 @@
-# keep your source, scripts, configs
 __pycache__/
 *.pyc
 *.pyo
