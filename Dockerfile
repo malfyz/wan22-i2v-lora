@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Python toolchain ---
 RUN python -m pip install -U pip setuptools wheel typing_extensions "protobuf>=3.20,<5"
 
-# --- Core training/runtime deps (NO gradio) ---
+# --- Core training/runtime deps (NO gradio, NO datasets to avoid pyarrow) ---
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; return 1; }; \
   PKGS=( \
@@ -41,7 +41,6 @@ RUN set -e; \
     "tqdm>=4.66.5" \
     "scipy>=1.11.4" \
     "numpy>=1.26.4" \
-    "datasets>=2.21.0" \
     "transformers>=4.44.2" \
     "peft>=0.11.1" \
   ); \
@@ -51,21 +50,17 @@ RUN set -e; \
   done
 
 # --- Musubi-Tuner (WAN 2.2 LoRA trainer) ---
-# install from GitHub in editable mode so scripts are available
 RUN cd /opt && git clone https://github.com/kohya-ss/musubi-tuner.git && \
     cd /opt/musubi-tuner && python -m pip install -e .
 
-# --- Copy repo into /workspace (ensures your scripts/configs are present) ---
+# --- Copy repo into /workspace ---
 COPY . /workspace
 
 # --- Install bootstrap to a stable path and also keep it in /workspace ---
-# (If your repo has wan22_bootstrap.sh, this COPY ensures it’s inside the image)
 COPY wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh
 RUN test -f /usr/local/bin/wan22_bootstrap.sh || (echo "FATAL: wan22_bootstrap.sh missing from build context" && exit 1)
 RUN dos2unix /usr/local/bin/wan22_bootstrap.sh || true
 RUN chmod +x /usr/local/bin/wan22_bootstrap.sh
-
-# If it also exists in /workspace, normalize it; otherwise we’ll restore at start.
 RUN if [ -f /workspace/wan22_bootstrap.sh ]; then dos2unix /workspace/wan22_bootstrap.sh || true; chmod +x /workspace/wan22_bootstrap.sh || true; fi
 
 # --- Ensure expected dirs exist ---
@@ -81,9 +76,6 @@ RUN mkdir -p /workspace/models/diffusion_models \
              /root/.cache/huggingface/accelerate
 
 # --- Startup wrapper ---
-# 1) restore /workspace/wan22_bootstrap.sh from /usr/local/bin if missing
-# 2) run bootstrap (models/datasets + training scripts creation)
-# 3) keep the container alive so RunPod SSH works even if bootstrap exits
 RUN printf '%s\n' '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'echo "[STARTUP] Ensuring bootstrap at /workspace/wan22_bootstrap.sh..."' \
