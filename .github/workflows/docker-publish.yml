@@ -55,5 +55,6 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/wan22:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/wan22:r13-2025-10-17-1
           cache-from: type=gha
           cache-to: type=gha,mode=max
