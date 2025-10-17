@@ -1,19 +1,17 @@
 # Dockerfile
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
-# Always use conda's python/pip (the base image ships with it)
+# Use conda's python/pip everywhere
 ENV PATH=/opt/conda/bin:$PATH \
     DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DEFAULT_TIMEOUT=120 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_PROGRESS_BAR=off \
-    GRADIO_SERVER_NAME=0.0.0.0 \
-    GRADIO_SERVER_PORT=7860
+    PIP_PROGRESS_BAR=off
 
 WORKDIR /workspace
 
-# --- OS deps (bash + libs for opencv/matplotlib/ffmpeg/fonts) ---
+# --- OS deps ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash git git-lfs aria2 unzip zip rsync nano htop psmisc \
     libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 ffmpeg \
@@ -23,15 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Use bash for RUN steps
 SHELL ["/bin/bash", "-lc"]
 
-# --- Keep toolchain current (on conda's python) ---
+# --- Python toolchain (conda python) ---
 RUN /opt/conda/bin/python -m pip install -U pip setuptools wheel typing_extensions
 
-# --- Pre-pin protobuf for tensorboard compatibility ---
+# TensorBoard sometimes prefers protobuf<5
 RUN /opt/conda/bin/python -m pip install "protobuf>=3.20,<5"
 
-# --- Known-good pins (compatible with PyTorch 2.5 + Python 3.11) ---
-# If any of these still fail in your environment, the loop below will print
-# exactly which one failed before exiting.
+# --- Python deps (NO GRADIO) ---
+# We install one-by-one with retries so failures are obvious.
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; return 1; }; \
   PKGS=( \
@@ -41,7 +38,13 @@ RUN set -e; \
     "huggingface_hub==0.25.2" \
     "accelerate==1.1.1" \
     "opencv-python-headless==4.10.0.84" \
-    "gradio==4.45.0" \
+    "safetensors>=0.4.4" \
+    "tqdm>=4.66.5" \
+    "scipy>=1.11.4" \
+    "numpy>=1.26.4" \
+    "datasets>=2.21.0" \
+    "transformers>=4.44.2" \
+    "peft>=0.11.1" \
   ); \
   for PKG in "${PKGS[@]}"; do \
     echo "=== Installing $PKG ==="; \
@@ -52,9 +55,9 @@ RUN set -e; \
     fi; \
   done
 
-# --- Validate at build-time (fail now if imports are broken) ---
+# --- Quick import sanity (no Gradio) ---
 RUN /opt/conda/bin/python - <<'PY'
-mods = ["gradio","cv2","accelerate","huggingface_hub","matplotlib","tensorboard","prompt_toolkit"]
+mods = ["cv2","accelerate","huggingface_hub","matplotlib","tensorboard","prompt_toolkit","safetensors","tqdm","scipy","numpy","datasets","transformers","peft"]
 for m in mods:
     __import__(m)
 print("OK imports:", mods)
@@ -63,12 +66,19 @@ PY
 # --- Copy your project into the image ---
 COPY . /workspace
 
-# Place bootstrap in a guaranteed path and make it executable
-RUN cp /workspace/wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh && \
-    chmod +x /usr/local/bin/wan22_bootstrap.sh
+# --- Create a tiny keepalive so the container never exits (SSH can attach) ---
+RUN printf '%s\n' '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'echo "[KEEPALIVE] Container up. $(date)";' \
+    'echo "[KEEPALIVE] Python: $(python --version)";' \
+    'echo "[KEEPALIVE] Listing /workspace:";' \
+    'ls -la /workspace || true' \
+    'echo "[KEEPALIVE] Sleeping..."' \
+    'while true; do sleep 3600; done' \
+    > /usr/local/bin/keepalive.sh && chmod +x /usr/local/bin/keepalive.sh
 
-# Expose Gradio port
-EXPOSE 7860
+# Default working dir
+WORKDIR /workspace
 
-# On container start: show /workspace contents, then run bootstrap
-ENTRYPOINT ["/bin/bash","-lc","echo '[ENTRYPOINT] /workspace listing:'; ls -la /workspace || true; /usr/local/bin/wan22_bootstrap.sh"]
+# Keep container running for SSH
+ENTRYPOINT ["/bin/bash","-lc","/usr/local/bin/keepalive.sh"]
