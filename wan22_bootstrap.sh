@@ -2,16 +2,16 @@
 set -euo pipefail
 
 echo "[BOOTSTRAP] Python: $(python --version)"
-echo "[BOOTSTRAP] CUDA: $(python - <<'PY'
-import torch
-print("torch", torch.__version__)
-print("cuda available:", torch.cuda.is_available())
-print("device count:", torch.cuda.device_count())
-PY
-)"
 
-echo "[BOOTSTRAP] Listing /workspace:"
-ls -la /workspace
+python - <<'PY'
+import torch, sys
+print("[BOOTSTRAP] torch:", torch.__version__)
+print("[BOOTSTRAP] cuda available:", torch.cuda.is_available())
+print("[BOOTSTRAP] device count:", torch.cuda.device_count())
+PY
+
+echo "[BOOTSTRAP] Listing /workspace (from bootstrap):"
+ls -la /workspace || true
 
 APP_PATH="/workspace/app.py"
 if [[ ! -f "$APP_PATH" ]]; then
@@ -19,10 +19,7 @@ if [[ ! -f "$APP_PATH" ]]; then
   exit 1
 fi
 
-# Optional: Hugging Face cache path (keeps things tidy)
 export HF_HOME="${HF_HOME:-/root/.cache/huggingface}"
-
-# Gradio defaults (can be overridden via env)
 export GRADIO_SERVER_NAME="${GRADIO_SERVER_NAME:-0.0.0.0}"
 export GRADIO_SERVER_PORT="${GRADIO_SERVER_PORT:-7860}"
 
