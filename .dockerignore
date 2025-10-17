@@ -1,4 +1,4 @@
-# KEEP SOURCE FILES. Do NOT ignore *.sh or *.py.
+# keep your source, scripts, configs
 __pycache__/
 *.pyc
 *.pyo
@@ -20,8 +20,3 @@ build/
 node_modules/
 .DS_Store
 Thumbs.db
-
-# Optional (only if you NEVER need them inside the image)
-# data/
-# datasets/
-# outputs/
