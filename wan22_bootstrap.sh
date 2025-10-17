@@ -2,20 +2,39 @@
 set -euo pipefail
 
 echo "[BOOTSTRAP] Python: $(python --version)"
-
 python - <<'PY'
-import torch, sys
+import torch
 print("[BOOTSTRAP] torch:", torch.__version__)
 print("[BOOTSTRAP] cuda available:", torch.cuda.is_available())
 print("[BOOTSTRAP] device count:", torch.cuda.device_count())
 PY
 
-echo "[BOOTSTRAP] Listing /workspace (from bootstrap):"
+echo "[BOOTSTRAP] PATH: $PATH"
+echo "[BOOTSTRAP] which python: $(which python)"
+echo "[BOOTSTRAP] pip path: $(python - <<'PY'
+import sys, os
+import site
+import pip
+print(pip.__file__)
+print(site.getsitepackages())
+PY
+)"
+
+echo "[BOOTSTRAP] Listing /workspace:"
 ls -la /workspace || true
+
+# Minimal runtime guard: ensure gradio is importable; if not, install once.
+if ! python - <<'PY' 2>/dev/null; then
+    echo "[BOOTSTRAP] gradio missing at runtime; installing now (one-time fallback)..."
+    python -m pip install --no-cache-dir "gradio==4.45.0"
+fi
+import gradio, sys
+print("[BOOTSTRAP] gradio version:", gradio.__version__)
+PY
 
 APP_PATH="/workspace/app.py"
 if [[ ! -f "$APP_PATH" ]]; then
-  echo "[BOOTSTRAP][FATAL] $APP_PATH not found in container. Exiting."
+  echo "[BOOTSTRAP][FATAL] $APP_PATH not found. Exiting."
   exit 1
 fi
 
