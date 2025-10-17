@@ -46,7 +46,7 @@ jobs:
           load: true
           tags: test/wan22:precheck
 
-      # Build & push heavy image directly to registry (no local load)
+      # Build & push final image directly (no local load)
       - name: Build and Push (final)
         uses: docker/build-push-action@v6
         with:
