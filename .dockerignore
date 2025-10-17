@@ -1,7 +1,5 @@
-# Keep source code — DO NOT ignore *.py or src/ !
-# Trim only what bloats the build context.
+# Keep source code! Do not ignore *.py or app.py
 
-# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -10,29 +8,23 @@ __pycache__/
 .venv/
 venv/
 
-# Git and local stuff
 .git
 .gitignore
 .gitattributes
 
-# Envs / secrets (ensure you don't commit real secrets)
 .env
 .env.*
 *.env
 
-# Build artifacts
 dist/
 build/
 *.log
-
-# Node
 node_modules/
-
-# OS junk
 .DS_Store
 Thumbs.db
 
-# Datasets / big local caches (optional; remove if you need them inside the image)
+# Optional: large local folders you do NOT want in the image
+# (remove these lines if you actually need them inside the image)
 data/
 datasets/
 outputs/
