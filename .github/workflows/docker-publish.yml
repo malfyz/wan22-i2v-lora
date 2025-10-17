@@ -1,59 +1,56 @@
-name: Build, Inspect, and Push Docker image
+name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
   workflow_dispatch:
-
-permissions:
-  contents: read
-  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build (load into runner for inspection)
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---------- BUILD AND LOAD LOCALLY FOR INSPECTION ----------
+      - name: Build (load for inspection)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          load: true         # <- load locally so we can 'docker run' it
+          load: true
           tags: test/wan22:inspect
 
-      - name: Diagnose image contents
+      # ---------- CHECK THAT BOOTSTRAP IS INSIDE THE IMAGE ----------
+      - name: Inspect image for bootstrap
         run: |
-          echo ">>> Listing /workspace from inside container"
-          docker run --rm --entrypoint bash test/wan22:inspect -lc "ls -la /workspace; echo '---'; test -f /workspace/wan22_bootstrap.sh && echo 'bootstrap present' || echo 'bootstrap MISSING'; test -f /workspace/app.py && echo 'app present' || echo 'app MISSING'"
+          echo "Checking that /usr/local/bin/wan22_bootstrap.sh exists..."
+          docker run --rm --entrypoint bash test/wan22:inspect -lc "
+            set -e;
+            echo '=== Should exist:';
+            ls -l /usr/local/bin/wan22_bootstrap.sh || (echo 'FATAL: bootstrap missing!' && exit 1);
+            echo;
+            echo '=== /workspace listing:';
+            ls -la /workspace | sed -n '1,120p';
+          "
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest
-            type=sha
-
-      - name: Build and Push
+      # ---------- IF INSPECTION PASSES, BUILD AND PUSH ----------
+      - name: Build and Push (final)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/wan22:latest
