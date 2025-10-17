@@ -1,5 +1,4 @@
-# Keep source code! Do not ignore *.py or app.py
-
+# KEEP SOURCE FILES. Do NOT ignore *.sh or *.py.
 __pycache__/
 *.pyc
 *.pyo
@@ -18,13 +17,11 @@ venv/
 
 dist/
 build/
-*.log
 node_modules/
 .DS_Store
 Thumbs.db
 
-# Optional: large local folders you do NOT want in the image
-# (remove these lines if you actually need them inside the image)
-data/
-datasets/
-outputs/
+# Optional (only if you NEVER need them inside the image)
+# data/
+# datasets/
+# outputs/
