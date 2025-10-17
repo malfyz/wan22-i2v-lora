@@ -25,7 +25,7 @@ RUN python -m pip install -U pip setuptools wheel typing_extensions
 # --- Pre-pin to avoid occasional tensorboard/protobuf resolver issues ---
 RUN python -m pip install "protobuf<5"
 
-# --- Install Python deps, with retries (before copying source for better cache) ---
+# --- Python deps (install before source for better layer cache) ---
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && break; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; }; \
   for PKG in \
@@ -41,17 +41,15 @@ RUN set -e; \
     retry python -m pip install --prefer-binary --no-cache-dir "$PKG"; \
   done
 
-# --- Copy your entire repo into /workspace (ensures app.py is present) ---
+# --- Copy full repo into image ---
 COPY . /workspace
 
-# Make bootstrap executable
-RUN chmod +x /workspace/wan22_bootstrap.sh
+# --- Put bootstrap in a stable, guaranteed location too ---
+RUN cp /workspace/wan22_bootstrap.sh /usr/local/bin/wan22_bootstrap.sh && \
+    chmod +x /usr/local/bin/wan22_bootstrap.sh
 
-# Expose Gradio port
+# Expose Gradio
 EXPOSE 7860
 
-# Default working dir
-WORKDIR /workspace
-
-# Launch bootstrap (which runs the Gradio app)
-ENTRYPOINT ["/bin/bash","-lc","/workspace/wan22_bootstrap.sh"]
+# Sanity: show what's inside /workspace at startup, then run bootstrap
+ENTRYPOINT ["/bin/bash","-lc","echo '[ENTRYPOINT] Listing /workspace:'; ls -la /workspace || true; /usr/local/bin/wan22_bootstrap.sh"]
