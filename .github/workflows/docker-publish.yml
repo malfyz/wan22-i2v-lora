@@ -2,8 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -14,6 +13,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Free disk on the runner
+      - name: Maximize build space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          sudo docker system prune -af || true
+          echo "=== After cleanup ==="
+          df -h
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -23,29 +36,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---------- BUILD AND LOAD LOCALLY FOR INSPECTION ----------
-      - name: Build (load for inspection)
+      # Tiny precheck stage (does not build heavy layers)
+      - name: Precheck bootstrap presence
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+          target: precheck
           load: true
-          tags: test/wan22:inspect
+          tags: test/wan22:precheck
 
-      # ---------- CHECK THAT BOOTSTRAP IS INSIDE THE IMAGE ----------
-      - name: Inspect image for bootstrap
-        run: |
-          echo "Checking that /usr/local/bin/wan22_bootstrap.sh exists..."
-          docker run --rm --entrypoint bash test/wan22:inspect -lc "
-            set -e;
-            echo '=== Should exist:';
-            ls -l /usr/local/bin/wan22_bootstrap.sh || (echo 'FATAL: bootstrap missing!' && exit 1);
-            echo;
-            echo '=== /workspace listing:';
-            ls -la /workspace | sed -n '1,120p';
-          "
-
-      # ---------- IF INSPECTION PASSES, BUILD AND PUSH ----------
+      # Build & push heavy image directly to registry (no local load)
       - name: Build and Push (final)
         uses: docker/build-push-action@v6
         with:
@@ -54,3 +55,5 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/wan22:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
