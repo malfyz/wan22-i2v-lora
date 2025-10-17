@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Python toolchain ---
 RUN python -m pip install -U pip setuptools wheel typing_extensions "protobuf>=3.20,<5"
 
-# --- Core training/runtime deps (LEAN: no scipy, no matplotlib, no datasets/pyarrow) ---
+# --- Core training/runtime deps (LEAN: no scipy/matplotlib/datasets; NO musubi here) ---
 RUN set -e; \
   retry() { n=0; until [ $n -ge 3 ]; do "$@" && return 0; n=$((n+1)); echo "Retry $n: $*"; sleep $((5*n)); done; return 1; }; \
   PKGS=( \
@@ -60,10 +60,6 @@ RUN set -e; \
   done \
   && conda clean -afy || true \
   && rm -rf /opt/conda/pkgs/* /root/.cache/pip || true
-
-# --- Musubi-Tuner (WAN 2.2 LoRA trainer) ---
-RUN cd /opt && git clone https://github.com/kohya-ss/musubi-tuner.git && \
-    cd /opt/musubi-tuner && python -m pip install -e .
 
 # --- Copy repo into /workspace ---
 COPY . /workspace
