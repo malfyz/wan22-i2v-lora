@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# WAN 2.2 I2V LoRA bootstrap (RunPod-friendly)
-# - Installs musubi-tuner
+# WAN 2.2 I2V LoRA bootstrap (RunPod-friendly, resilient)
+# - Installs musubi-tuner (editable)
 # - Downloads WAN 2.2 I2V (high/low), VAE, and UMT5 XXL
-# - Imports dataset from URL (zip)
-# - Creates simple training scripts (high / low noise)
-# - Uses cautious env defaults to avoid CUDA/NCCL init issues
+# - Imports dataset .zip
+# - Creates dataset config + simple high/low training scripts
+# - Accelerate config (bf16, 1 GPU)
+# - Retries + resumable HF downloads; optional keep-alive
 
-set -u -o pipefail
+set -u -o pipefail   # (intentionally not -e so a failed step doesn’t stop everything)
 
 # ---------- Tunables / overridable via env ----------
 WORKDIR="${WORKDIR:-/workspace}"
@@ -18,14 +19,9 @@ SCRIPTS_DIR="$WORKDIR/scripts"
 CONFIGS_DIR="$WORKDIR/configs"
 LOGS_DIR="$WORKDIR/logs"
 
-# Dataset source (override if you like)
 DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://rsvp.ninja/wan_lora.zip}"
-
-# HF repo containing WAN 2.2 repackaged weights
 WAN_REPO="${WAN_REPO:-Comfy-Org/Wan_2.2_ComfyUI_Repackaged}"
-
-# Optional: set KEEP_ALIVE=1 to keep container alive at end
-KEEP_ALIVE="${KEEP_ALIVE:-0}"
+KEEP_ALIVE="${KEEP_ALIVE:-0}"   # 1 = keep container alive after bootstrap
 
 mkdir -p \
   "$MODELS_DIR/diffusion_models" \
@@ -40,13 +36,14 @@ FAILED=() ; SUCCEEDED=()
 note_fail(){ FAILED+=("$1"); echo "[FAIL] $1"; }
 note_ok(){   SUCCEEDED+=("$1"); echo "[OK]   $1"; }
 
+# ---------- helpers ----------
 retry () {
   # retry <times> <sleep_base_sec> -- <cmd...>
   local times="$1"; shift
   local base="$1"; shift
-  shift $(( $# > 0 && $1 == "--" ? 1 : 0 ))
+  if [ "$#" -gt 0 ] && [ "${1:-}" = "--" ]; then shift; fi
   local i=1
-  while true; do
+  while :; do
     "$@" && return 0
     if [ $i -ge "$times" ]; then return 1; fi
     echo "  retry $i/$times: $*"
@@ -55,58 +52,21 @@ retry () {
   done
 }
 
-# ---------- system packages we rely on ----------
-step="sys_pkgs"
-if command -v apt-get >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive retry 3 5 -- apt-get update -y && \
-  retry 3 5 -- apt-get install -y --no-install-recommends \
-    git curl unzip rsync && note_ok "$step" || note_fail "$step"
-else
-  echo "[WARN] apt-get not present; assuming git/curl/unzip/rsync available"
-  note_ok "$step"
-fi
-
-# ---------- Python basics ----------
-step="pip_upgrade"
-retry 3 5 -- python -m pip install --upgrade pip wheel setuptools && note_ok "$step" || note_fail "$step"
-
-# ---------- Hugging Face CLI (for robust downloads) ----------
-step="hf_cli"
-if command -v hf >/dev/null 2>&1; then HF=hf
-elif command -v huggingface-cli >/dev/null 2>&1; then HF=huggingface-cli
-else
-  if retry 3 5 -- python -m pip install "huggingface_hub[cli]==0.25.2"; then
-    HF=huggingface-cli
+need_cli () {
+  if command -v hf >/dev/null 2>&1; then HF=hf
+  elif command -v huggingface-cli >/dev/null 2>&1; then HF=huggingface-cli
   else
-    HF=""
+    echo "[SETUP] installing huggingface_hub CLI…"
+    if retry 3 5 -- python -m pip install --no-cache-dir "huggingface_hub[cli]==0.25.2"; then
+      HF=huggingface-cli
+    else
+      HF=""
+    fi
   fi
-fi
-[ -n "${HF:-}" ] && note_ok "$step" || note_fail "$step"
+  echo "[SETUP] HF CLI: ${HF:-MISSING}"
+}
 
-# Try high-speed transfer if available
-python - <<'PY' 2>/dev/null || true
-import pkgutil, os, sys
-if not pkgutil.find_loader('hf_transfer'):
-    os.system("python -m pip install -q hf_transfer")
-print("OK")
-PY
-export HF_HUB_ENABLE_HF_TRANSFER=1
-
-# ---------- musubi-tuner (editable) ----------
-step="musubi_install"
-if [ ! -d /opt/musubi-tuner ]; then
-  if retry 3 5 -- git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner && \
-     retry 3 5 -- python -m pip install -e /opt/musubi-tuner; then
-    note_ok "$step"
-  else
-    note_fail "$step"
-  fi
-else
-  echo "[SETUP] musubi-tuner already present; ensuring install…"
-  if python -m pip install -e /opt/musubi-tuner; then note_ok "$step"; else note_fail "$step"; fi
-fi
-
-# ---------- helper: download one HF file (resume, token optional) ----------
+# download single file; normalize split_files layout; resume; optional HF_TOKEN
 dl_one () {
   # dl_one <repo> <repo_rel_path> <dest_dir>
   local repo="$1"; shift
@@ -121,6 +81,7 @@ dl_one () {
     return 0
   fi
   echo "  - fetching $repo/$rel → $out"
+
   if [ -n "${HF:-}" ]; then
     if [ -n "${HF_TOKEN:-}" ]; then
       retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --token "$HF_TOKEN" --resume || return 1
@@ -128,7 +89,7 @@ dl_one () {
       retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --resume || return 1
     fi
   else
-    # Fallback: plain HTTP for public repos
+    # Fallback for public assets
     local url="https://huggingface.co/${repo}/resolve/main/${rel}"
     retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$target" "$url" || return 1
   fi
@@ -146,6 +107,48 @@ dl_one () {
   [ -f "$target" ] || return 1
   echo "  - ready: $target"
 }
+
+# ---------- system packages ----------
+step="sys_pkgs"
+if command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive retry 3 5 -- apt-get update -y && \
+  retry 3 5 -- apt-get install -y --no-install-recommends git curl unzip rsync && note_ok "$step" || note_fail "$step"
+else
+  echo "[WARN] apt-get not present; assuming git/curl/unzip/rsync available"
+  note_ok "$step"
+fi
+
+# ---------- Python basics ----------
+step="pip_upgrade"
+retry 3 5 -- python -m pip install --upgrade pip wheel setuptools && note_ok "$step" || note_fail "$step"
+
+# ---------- HF CLI + (optional) fast transfer ----------
+step="hf_cli"
+need_cli
+[ -n "${HF:-}" ] && note_ok "$step" || note_fail "$step"
+
+python - <<'PY' 2>/dev/null || true
+import pkgutil, os
+if not pkgutil.find_loader('hf_transfer'):
+    os.system("python -m pip install -q hf_transfer")
+print("OK")
+PY
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# ---------- musubi-tuner (editable) ----------
+step="musubi_install"
+if [ ! -d /opt/musubi-tuner ]; then
+  echo "[SETUP] Installing musubi-tuner…"
+  if retry 3 5 -- git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner && \
+     retry 3 5 -- python -m pip install --no-cache-dir -e /opt/musubi-tuner; then
+    note_ok "$step"
+  else
+    note_fail "$step"
+  fi
+else
+  echo "[SETUP] musubi-tuner already present."
+  if python -m pip install --no-cache-dir -e /opt/musubi-tuner; then note_ok "$step"; else note_fail "$step"; fi
+fi
 
 # ---------- Models: WAN 2.2 I2V (high/low), VAE, UMT5 ----------
 echo "[MODELS] downloading (WAN 2.2 repack)"
@@ -221,7 +224,7 @@ export CUDA_MODULE_LOADING=LAZY
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 
-# ---------- Training scripts (simple, one per noise level) ----------
+# ---------- Training scripts (simple: high / low) ----------
 step="script_high"
 cat > "$SCRIPTS_DIR/train_i2v_high.sh" <<'BASH' && chmod +x "$SCRIPTS_DIR/train_i2v_high.sh" && note_ok "$step" || note_fail "$step"
 #!/usr/bin/env bash
@@ -308,7 +311,7 @@ accelerate launch -m musubi_tuner.wan_train_network \
 BASH
 
 echo "[SCRIPTS] ready:"
-ls -la "$SCRIPTS_DIR" | sed -n '1,120p' || true
+ls -la "$SCRIPTS_DIR" | sed -n '1,200p' || true
 
 # ---------- Summary ----------
 echo
