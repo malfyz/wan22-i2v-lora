@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # WAN 2.2 I2V LoRA bootstrap (RunPod-friendly, resilient)
 # - Installs musubi-tuner (editable)
-# - Downloads WAN 2.2 I2V (high/low), VAE, and UMT5 XXL
+# - Downloads WAN 2.2 I2V (high/low), UMT5 XXL, and **Wan 2.1 VAE (required for I2V 14B)**
 # - Imports dataset .zip
-# - Creates dataset config + simple high/low training scripts
-# - Accelerate config (bf16, 1 GPU)
+# - Writes TOML dataset config ([general] + [[datasets]])
+# - Creates high/low noise training scripts using Wan 2.1 VAE
+# - Accelerate config (bf16, 1 GPU) + safe env flags
 # - Retries + resumable HF downloads; optional keep-alive
 
-set -u -o pipefail   # (intentionally not -e so a failed step doesn’t stop everything)
+set -u -o pipefail   # (not -e; we want a summary even if steps fail)
 
-# ---------- Tunables / overridable via env ----------
+# ---------- Tunables (override via env) ----------
 WORKDIR="${WORKDIR:-/workspace}"
 MODELS_DIR="$WORKDIR/models"
 DATASETS_DIR="$WORKDIR/datasets"
@@ -66,7 +67,7 @@ need_cli () {
   echo "[SETUP] HF CLI: ${HF:-MISSING}"
 }
 
-# download single file; normalize split_files layout; resume; optional HF_TOKEN
+# Download one HF file; normalize split_files nesting; resume; optional HF_TOKEN
 dl_one () {
   # dl_one <repo> <repo_rel_path> <dest_dir>
   local repo="$1"; shift
@@ -89,12 +90,12 @@ dl_one () {
       retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --resume || return 1
     fi
   else
-    # Fallback for public assets
+    # public fallback
     local url="https://huggingface.co/${repo}/resolve/main/${rel}"
     retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$target" "$url" || return 1
   fi
 
-  # normalize split_files nesting if needed
+  # normalize split_files if nested
   if [ ! -f "$target" ]; then
     local found
     found="$(find "$out" -type f -name "$base" | head -n1 || true)"
@@ -122,7 +123,7 @@ fi
 step="pip_upgrade"
 retry 3 5 -- python -m pip install --upgrade pip wheel setuptools && note_ok "$step" || note_fail "$step"
 
-# ---------- HF CLI + (optional) fast transfer ----------
+# ---------- HF CLI + optional fast transfer ----------
 step="hf_cli"
 need_cli
 [ -n "${HF:-}" ] && note_ok "$step" || note_fail "$step"
@@ -150,12 +151,17 @@ else
   if python -m pip install --no-cache-dir -e /opt/musubi-tuner; then note_ok "$step"; else note_fail "$step"; fi
 fi
 
-# ---------- Models: WAN 2.2 I2V (high/low), VAE, UMT5 ----------
+# ---------- Models: WAN 2.2 I2V (high/low), UMT5, **Wan 2.1 VAE** ----------
 echo "[MODELS] downloading (WAN 2.2 repack)"
 step="model_umt5"
 dl_one "$WAN_REPO" "split_files/text_encoders/umt5_xxl_fp16.safetensors" "$MODELS_DIR/text_encoders" && note_ok "$step" || note_fail "$step"
 
-step="model_vae_2p2"
+# REQUIRED for I2V 14B: Wan 2.1 VAE
+step="model_vae_2p1"
+dl_one "$WAN_REPO" "split_files/vae/wan_2.1_vae.safetensors" "$MODELS_DIR/vae" && note_ok "$step" || note_fail "$step"
+
+# Optional: also grab 2.2 VAE (some other tasks use it)
+step="model_vae_2p2_optional"
 dl_one "$WAN_REPO" "split_files/vae/wan2.2_vae.safetensors" "$MODELS_DIR/vae" && note_ok "$step" || note_fail "$step"
 
 step="model_i2v_high"
@@ -191,33 +197,29 @@ if retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$tmp" 
   if unzip -q "$tmp" -d /tmp/dsunpack 2>/dev/null || tar -xf "$tmp" -C /tmp/dsunpack 2>/dev/null; then
     rsync -a --ignore-existing /tmp/dsunpack/ "$DATASETS_DIR/character_images/" && note_ok "$step" || note_fail "$step"
   else
-    echo "[DATASET] unknown archive format; placing raw file into dataset dir"
+    echo "[DATASET] unknown archive; placing raw file"
     mv -f "$tmp" "$DATASETS_DIR/character_images/wan_lora.zip" && note_ok "$step" || note_fail "$step"
   fi
 else
   note_fail "$step"
 fi
 
-# ---------- Dataset config (I2V) ----------
+# ---------- Dataset config (TOML) ----------
 step="dataset_config"
-CONF="$CONFIGS_DIR/dataset_i2v.json"
-if [ ! -f "$CONF" ]; then
-  cat > "$CONF" <<'JSON' && note_ok "$step" || note_fail "$step"
-{
-  "name": "wan22_i2v_char",
-  "type": "i2v",
-  "resolution": [1280, 720],
-  "frames_per_sample": 32,
-  "bucket_resolutions": [[1280,720],[1440,810],[960,544]],
-  "train_data": [
-    { "path": "/workspace/datasets/character_images", "caption_ext": ".txt", "shuffle": true, "repeat": 1 }
-  ],
-  "val_images": []
-}
-JSON
-else
-  note_ok "$step"
-fi
+CONF="$CONFIGS_DIR/dataset_i2v.toml"
+cat > "$CONF" <<'TOML' && note_ok "$step" || note_fail "$step"
+[general]
+resolution = [1280, 720]
+caption_extension = ".txt"    # remove this line if you do NOT have sidecar captions
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = false
+
+[[datasets]]
+image_directory = "/workspace/datasets/character_images"
+cache_directory = "/workspace/cache/i2v"
+num_repeats = 1
+TOML
 
 # ---------- Environment flags to avoid CUDA/NCCL hiccups ----------
 export CUDA_MODULE_LOADING=LAZY
@@ -234,30 +236,30 @@ export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 
 M=/workspace/models
-CONF=/workspace/configs/dataset_i2v.json
+CONF=/workspace/configs/dataset_i2v.toml
 LOG=/workspace/logs/train_high.log
 
-# (1) Cache latents (GPU)
+# (1) Cache latents (GPU) — **Wan 2.1 VAE**
 python -u -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
-  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --vae "$M/vae/wan_2.1_vae.safetensors" \
   --i2v \
   --device cuda \
   --batch_size 2 --num_workers 0 | tee "$LOG"
 
-# (2) Cache UMT5 text enc outputs
+# (2) Cache UMT5 text-encoder outputs
 python -u -m musubi_tuner.wan_cache_text_encoder_outputs \
   --dataset_config "$CONF" \
   --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
   --device cuda \
   --batch_size 4 | tee -a "$LOG"
 
-# (3) Train LoRA (HIGH noise)
+# (3) Train LoRA (HIGH noise DiT)
 accelerate launch -m musubi_tuner.wan_train_network \
   --task i2v-A14B \
   --dataset_config "$CONF" \
   --dit "$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" \
-  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --vae "$M/vae/wan_2.1_vae.safetensors" \
   --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
   --network_module lora \
   --rank 32 \
@@ -278,27 +280,30 @@ export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 
 M=/workspace/models
-CONF=/workspace/configs/dataset_i2v.json
+CONF=/workspace/configs/dataset_i2v.toml
 LOG=/workspace/logs/train_low.log
 
+# (1) Cache latents (GPU) — **Wan 2.1 VAE**
 python -u -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
-  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --vae "$M/vae/wan_2.1_vae.safetensors" \
   --i2v \
   --device cuda \
   --batch_size 2 --num_workers 0 | tee "$LOG"
 
+# (2) Cache UMT5 text-encoder outputs
 python -u -m musubi_tuner.wan_cache_text_encoder_outputs \
   --dataset_config "$CONF" \
   --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
   --device cuda \
   --batch_size 4 | tee -a "$LOG"
 
+# (3) Train LoRA (LOW noise DiT)
 accelerate launch -m musubi_tuner.wan_train_network \
   --task i2v-A14B \
   --dataset_config "$CONF" \
   --dit "$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors" \
-  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --vae "$M/vae/wan_2.1_vae.safetensors" \
   --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
   --network_module lora \
   --rank 32 \
