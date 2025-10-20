@@ -1,90 +1,159 @@
 #!/usr/bin/env bash
-# wan22_bootstrap.sh — Runtime setup for WAN 2.2 I2V training (manual start)
+# WAN 2.2 bootstrap — resilient version
+# - Installs musubi-tuner (retries)
+# - Downloads models (retries + resume; normalizes split_files/)
+# - Creates training scripts (BF16 + xformers; 30 epochs)
+# - Optional dataset import via URL
+# - Continues on errors; summarizes failures at end; keeps pod alive
 
-set -euo pipefail
+set -u -o pipefail  # NOT using -e so we can continue on individual step failures
 
-echo "[BOOTSTRAP] Starting WAN22 runtime setup..."
-
-# ---------- Paths ----------
 WORKDIR="${WORKDIR:-/workspace}"
 MODELS_DIR="$WORKDIR/models"
 DATASETS_DIR="$WORKDIR/datasets"
 OUT_DIR="$WORKDIR/outputs"
 CACHE_DIR="$WORKDIR/cache"
+SCRIPTS_DIR="$WORKDIR/scripts"
+CONFIGS_DIR="$WORKDIR/configs"
 
 mkdir -p \
   "$MODELS_DIR/diffusion_models" \
   "$MODELS_DIR/text_encoders" \
   "$MODELS_DIR/vae" \
   "$DATASETS_DIR/character_images" \
-  "$WORKDIR/scripts" \
-  "$WORKDIR/configs" \
-  "$OUT_DIR" \
-  "$CACHE_DIR"
+  "$OUT_DIR" "$CACHE_DIR" "$SCRIPTS_DIR" "$CONFIGS_DIR"
 
-# ---------- HuggingFace CLI ----------
-if ! command -v hf >/dev/null 2>&1 && ! command -v huggingface-cli >/dev/null 2>&1; then
-  echo "[BOOTSTRAP] Installing huggingface_hub CLI..."
-  python -m pip install --no-cache-dir "huggingface_hub[cli]==0.25.2"
-fi
-if command -v hf >/dev/null 2>&1; then HF=hf; else HF=huggingface-cli; fi
-echo "[BOOTSTRAP] Using HF CLI: $HF"
+echo "[BOOTSTRAP] start $(date -Iseconds)"
 
-# ---------- Helper download ----------
-dl () {
+FAILED=()    # collect step names that fail
+SUCCEEDED=() # collect successes
+
+note_fail () { FAILED+=("$1"); echo "[FAIL] $1"; }
+note_ok   () { SUCCEEDED+=("$1"); echo "[OK]   $1"; }
+
+# ---------- helpers ----------
+retry () {
+  # retry <times> <sleep_base_sec> -- <cmd...>
+  local times="$1"; shift
+  local base="$1"; shift
+  shift $(( $# > 0 && $1 == "--" ? 1 : 0 ))
+  local i=1
+  while true; do
+    "$@" && return 0
+    if [ $i -ge "$times" ]; then return 1; fi
+    echo "  retry $i/$times: $*"
+    sleep $(( base * i ))
+    i=$((i+1))
+  done
+}
+
+need_cli () {
+  if command -v hf >/dev/null 2>&1; then HF=hf
+  elif command -v huggingface-cli >/dev/null 2>&1; then HF=huggingface-cli
+  else
+    echo "[SETUP] installing huggingface_hub CLI…"
+    if retry 3 5 -- python -m pip install --no-cache-dir "huggingface_hub[cli]==0.25.2"; then
+      HF=huggingface-cli
+    else
+      HF=""
+    fi
+  fi
+  echo "[SETUP] HF CLI: ${HF:-MISSING}"
+}
+
+# download single file; normalize split_files layout; resume; optional $HF_TOKEN
+dl_one () {
+  # dl_one <repo> <repo_rel_path> <dest_dir>
   local repo="$1"; shift
   local rel="$1"; shift
   local out="$1"; shift
-
   mkdir -p "$out"
   local base="$(basename "$rel")"
-  if [ -f "$out/$base" ]; then
-    echo "  - exists: $out/$base"
-  else
-    echo "  - fetching $repo/$rel -> $out"
+  local target="$out/$base"
+
+  if [ -f "$target" ]; then
+    echo "  - exists: $target"
+    return 0
+  fi
+
+  echo "  - fetching $repo/$rel → $out"
+  if [ -n "${HF:-}" ]; then
     if [ -n "${HF_TOKEN:-}" ]; then
-      $HF download "$repo" "$rel" --local-dir "$out" --token "$HF_TOKEN" --resume
+      retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --token "$HF_TOKEN" --resume || return 1
     else
-      $HF download "$repo" "$rel" --local-dir "$out" --resume
+      retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --resume || return 1
+    fi
+  else
+    # very last resort: direct HTTP (no auth); only works for public assets
+    local url="https://huggingface.co/${repo}/resolve/main/${rel}"
+    retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$target" "$url" || return 1
+  fi
+
+  # normalize split_files if HF placed it nested
+  if [ ! -f "$target" ]; then
+    local found
+    found="$(find "$out" -type f -name "$base" | head -n1 || true)"
+    if [ -n "$found" ]; then
+      mv -f "$found" "$target" || return 1
+      # cleanup empties
+      find "$out" -type d -empty -delete || true
     fi
   fi
+
+  [ -f "$target" ] || return 1
+  echo "  - ready: $target"
 }
 
-REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
-echo "[WAN22] Downloading WAN 2.2 components..."
+# ---------- 0) HF + speedup ----------
+step="hf_cli"
+need_cli
+if [ -z "${HF:-}" ]; then note_fail "$step"; else note_ok "$step"; fi
 
-# ---------- TEXT ENCODER (FP16) ----------
-dl "$REPO" "split_files/text_encoders/umt5_xxl_fp16.safetensors" "$MODELS_DIR/text_encoders"
-if [ -f "$MODELS_DIR/text_encoders/split_files/text_encoders/umt5_xxl_fp16.safetensors" ]; then
-  mv -f "$MODELS_DIR/text_encoders/split_files/text_encoders/umt5_xxl_fp16.safetensors" \
-        "$MODELS_DIR/text_encoders/"
-  rm -rf "$MODELS_DIR/text_encoders/split_files" || true
-fi
-echo "[WAN22] FP16 text encoder ready."
-
-# ---------- VAE ----------
-dl "$REPO" "vae/wan_2.1_vae.safetensors" "$MODELS_DIR/vae"
-
-# ---------- DIFFUSION MODELS ----------
-dl "$REPO" "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" "$MODELS_DIR/diffusion_models"
-dl "$REPO" "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"  "$MODELS_DIR/diffusion_models"
-
-echo "[WAN22] All model files present:"
-find "$MODELS_DIR" -type f -name "*.safetensors" -printf "  %p\n" || true
-
-# ---------- Musubi-Tuner ----------
-if [ ! -d /opt/musubi-tuner ]; then
-  echo "[BOOTSTRAP] Installing Musubi-Tuner..."
-  git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner
-  python -m pip install --no-cache-dir -e /opt/musubi-tuner
+# optional transfer speedup
+if python -c "import pkgutil; import sys; sys.exit(0 if pkgutil.find_loader('hf_transfer') else 1)" 2>/dev/null; then
+  export HF_HUB_ENABLE_HF_TRANSFER=1
 else
-  echo "[BOOTSTRAP] Musubi-Tuner already installed."
+  python -m pip install --no-cache-dir -q hf_transfer && export HF_HUB_ENABLE_HF_TRANSFER=1 || true
 fi
 
-# ---------- Accelerate config ----------
-ACC="${HOME}/.cache/huggingface/accelerate/default_config.yaml"
+# ---------- 1) musubi-tuner ----------
+step="musubi_install"
+if [ ! -d /opt/musubi-tuner ]; then
+  echo "[SETUP] Installing musubi-tuner…"
+  if retry 3 5 -- git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner && \
+     retry 3 5 -- python -m pip install --no-cache-dir -e /opt/musubi-tuner; then
+    note_ok "$step"
+  else
+    note_fail "$step"
+  fi
+else
+  echo "[SETUP] musubi-tuner already present."
+  note_ok "$step"
+fi
+
+# ---------- 2) models (WAN 2.2 repack) ----------
+REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+
+step="model_text_encoder"
+dl_one "$REPO" "split_files/text_encoders/umt5_xxl_fp16.safetensors" "$MODELS_DIR/text_encoders" && note_ok "$step" || note_fail "$step"
+
+step="model_vae_2p2"
+dl_one "$REPO" "split_files/vae/wan2.2_vae.safetensors" "$MODELS_DIR/vae" && note_ok "$step" || note_fail "$step"
+
+step="model_i2v_high"
+dl_one "$REPO" "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" "$MODELS_DIR/diffusion_models" && note_ok "$step" || note_fail "$step"
+
+step="model_i2v_low"
+dl_one "$REPO" "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors" "$MODELS_DIR/diffusion_models" && note_ok "$step" || note_fail "$step"
+
+echo "[MODELS] present:"
+find "$MODELS_DIR" -maxdepth 3 -type f -name "*.safetensors" -printf "  %p\n" || true
+
+# ---------- 3) accelerate config (bf16, 1 GPU) ----------
+step="accelerate_config"
+ACC="$HOME/.cache/huggingface/accelerate/default_config.yaml"
 mkdir -p "$(dirname "$ACC")"
-cat > "$ACC" <<'YAML'
+cat > "$ACC" <<'YAML' && note_ok "$step" || note_fail "$step"
 compute_environment: LOCAL_MACHINE
 distributed_type: NO
 gpu_ids: '0'
@@ -94,10 +163,39 @@ num_processes: 1
 main_training_function: main
 YAML
 
-# ---------- Dataset config scaffold ----------
-CONF="$WORKDIR/configs/dataset_i2v.json"
+# ---------- 4) dataset import (optional; non-fatal) ----------
+# Provide ONE of these env vars to auto-import:
+#   DATASET_ZIP_URL : http(s) URL to a zip/tar(.gz) with images+captions
+#   DATASET_GIT_URL : git repo with images+captions
+# It will land in $DATASETS_DIR/character_images
+step="dataset_import"
+import_ok=0
+if [ -n "${DATASET_ZIP_URL:-}" ]; then
+  echo "[DATASET] downloading archive from DATASET_ZIP_URL → $DATASETS_DIR/character_images"
+  mkdir -p "$DATASETS_DIR/character_images"
+  tmp="/tmp/ds.$$"
+  if retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$tmp" "$DATASET_ZIP_URL"; then
+    mkdir -p /tmp/dsunpack && \
+    (unzip -q "$tmp" -d /tmp/dsunpack || tar -xf "$tmp" -C /tmp/dsunpack || true) && \
+    rsync -a --ignore-existing /tmp/dsunpack/ "$DATASETS_DIR/character_images/" && import_ok=1
+  fi
+elif [ -n "${DATASET_GIT_URL:-}" ]; then
+  echo "[DATASET] cloning DATASET_GIT_URL → $DATASETS_DIR/character_images"
+  if retry 3 5 -- git clone --depth 1 "$DATASET_GIT_URL" /tmp/dsgit; then
+    mkdir -p "$DATASETS_DIR/character_images"
+    rsync -a --ignore-existing /tmp/dsgit/ "$DATASETS_DIR/character_images/" && import_ok=1
+  fi
+else
+  echo "[DATASET] no DATASET_ZIP_URL / DATASET_GIT_URL provided; skipping (not fatal)."
+  import_ok=1  # skip isn’t a failure
+fi
+if [ "$import_ok" -eq 1 ]; then note_ok "$step"; else note_fail "$step"; fi
+
+# ---------- 5) dataset config scaffold ----------
+step="dataset_config"
+CONF="$CONFIGS_DIR/dataset_i2v.json"
 if [ ! -f "$CONF" ]; then
-cat > "$CONF" <<'JSON'
+  cat > "$CONF" <<'JSON' && note_ok "$step" || note_fail "$step"
 {
   "name": "wan22_i2v_char",
   "type": "i2v",
@@ -110,12 +208,13 @@ cat > "$CONF" <<'JSON'
   "val_images": []
 }
 JSON
+else
+  note_ok "$step"
 fi
 
-# ---------- Training scripts ----------
-echo "[BOOTSTRAP] Creating training scripts..."
-
-cat > "$WORKDIR/scripts/train_i2v_high.sh" <<'BASH'
+# ---------- 6) training scripts (Musubi CLI; BF16 + xformers; 30 epochs) ----------
+step="scripts_high"
+cat > "$SCRIPTS_DIR/train_i2v_high.sh" <<'BASH' && chmod +x "$SCRIPTS_DIR/train_i2v_high.sh" && note_ok "$step" || note_fail "$step"
 #!/usr/bin/env bash
 set -euo pipefail
 M=/workspace/models
@@ -124,25 +223,26 @@ CACHE=/workspace/cache/i2v_high
 CONF=/workspace/configs/dataset_i2v.json
 mkdir -p "$OUT" "$CACHE"
 
-/opt/conda/bin/python /opt/musubi-tuner/wan_cache_latents.py \
-  --model_path "$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" \
-  --text_encoder_path "$M/text_encoders/umt5_xxl_fp16.safetensors" \
-  --vae_path "$M/vae/wan_2.1_vae.safetensors" \
+# (1) Cache latents for i2v (needs VAE only)
+python -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
-  --output_dir "$CACHE" \
-  --i2v
+  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --i2v \
+  --batch_size 2 --num_workers 4
 
-/opt/conda/bin/python /opt/musubi-tuner/wan_cache_text_encoder_outputs.py \
-  --text_encoder_path "$M/text_encoders/umt5_xxl_fp16.safetensors" \
+# (2) Cache text encoder outputs (T5)
+python -m musubi_tuner.wan_cache_text_encoder_outputs \
   --dataset_config "$CONF" \
-  --output_dir "$CACHE"
+  --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
+  --batch_size 4
 
-accelerate launch /opt/musubi-tuner/wan_train_network.py \
-  --model_path "$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" \
-  --text_encoder_path "$M/text_encoders/umt5_xxl_fp16.safetensors" \
-  --vae_path "$M/vae/wan_2.1_vae.safetensors" \
+# (3) Train LoRA (high noise DiT)
+accelerate launch -m musubi_tuner.wan_train_network \
+  --task i2v-A14B \
   --dataset_config "$CONF" \
-  --output_dir "$OUT" \
+  --dit "$M/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" \
+  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
   --network_module lora \
   --rank 32 \
   --learning_rate 1e-4 \
@@ -150,14 +250,11 @@ accelerate launch /opt/musubi-tuner/wan_train_network.py \
   --gradient_accumulation_steps 4 \
   --max_train_epochs 30 \
   --mixed_precision bf16 \
-  --i2v \
-  --cache_latents_dir "$CACHE" \
-  --cache_text_encoder_outputs_dir "$CACHE" \
-  --enable_xformers
+  --xformers
 BASH
-chmod +x "$WORKDIR/scripts/train_i2v_high.sh"
 
-cat > "$WORKDIR/scripts/train_i2v_low.sh" <<'BASH'
+step="scripts_low"
+cat > "$SCRIPTS_DIR/train_i2v_low.sh" <<'BASH' && chmod +x "$SCRIPTS_DIR/train_i2v_low.sh" && note_ok "$step" || note_fail "$step"
 #!/usr/bin/env bash
 set -euo pipefail
 M=/workspace/models
@@ -166,36 +263,59 @@ CACHE=/workspace/cache/i2v_low
 CONF=/workspace/configs/dataset_i2v.json
 mkdir -p "$OUT" "$CACHE"
 
-/opt/conda/bin/python /opt/musubi-tuner/wan_cache_latents.py \
-  --model_path "$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors" \
-  --text_encoder_path "$M/text_encoders/umt5_xxl_fp16.safetensors" \
-  --vae_path "$M/vae/wan_2.1_vae.safetensors" \
+python -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
-  --output_dir "$CACHE" \
-  --i2v
-
-/opt/conda/bin/python /opt/musubi-tuner/wan_cache_text_encoder_outputs.py \
-  --text_encoder_path "$M/text_encoders/umt5_xxl_fp16.safetensors" \
-  --dataset_config "$CONF" \
-  --output_dir "$CACHE"
-
-accelerate launch /opt/musubi-tuner/wan_train_network.py \
-  --model_path "$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors" \
-  --text_encoder_path "$M/text_encoders/umt5_xxl_fp16*
-
-mixed_precision bf16 \
+  --vae "$M/vae/wan2.2_vae.safetensors" \
   --i2v \
-  --cache_latents_dir "$CACHE" \
-  --cache_text_encoder_outputs_dir "$CACHE" \
-  --enable_xformers
+  --batch_size 2 --num_workers 4
+
+python -m musubi_tuner.wan_cache_text_encoder_outputs \
+  --dataset_config "$CONF" \
+  --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
+  --batch_size 4
+
+accelerate launch -m musubi_tuner.wan_train_network \
+  --task i2v-A14B \
+  --dataset_config "$CONF" \
+  --dit "$M/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors" \
+  --vae "$M/vae/wan2.2_vae.safetensors" \
+  --t5 "$M/text_encoders/umt5_xxl_fp16.safetensors" \
+  --network_module lora \
+  --rank 32 \
+  --learning_rate 5e-5 \
+  --train_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --max_train_epochs 30 \
+  --mixed_precision bf16 \
+  --xformers
 BASH
-chmod +x "$WORKDIR/scripts/train_i2v_low.sh"
 
-echo "[BOOTSTRAP] Training scripts ready."
-echo "  -> bash /workspace/scripts/train_i2v_high.sh"
-echo "  -> bash /workspace/scripts/train_i2v_low.sh"
+echo "[SCRIPTS] ready:"
+ls -la "$SCRIPTS_DIR" | sed -n '1,80p' || true
 
-# ---------- KEEP CONTAINER ALIVE ----------
-echo "[BOOTSTRAP] Setup complete. Container will remain alive for SSH access."
+# ---------- summary ----------
+echo
+echo "================== SUMMARY =================="
+echo "[TIME] $(date -Iseconds)"
+if [ "${#SUCCEEDED[@]}" -gt 0 ]; then
+  echo "Succeeded:"
+  for s in "${SUCCEEDED[@]}"; do echo "  • $s"; done
+else
+  echo "Succeeded: (none)"
+fi
+
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  echo "FAILED (non-fatal; you can resume):"
+  for f in "${FAILED[@]}"; do echo "  • $f"; done
+  echo
+  echo "You can re-run *only* a failed step by exporting env and re-executing the relevant part,"
+  echo "or simply run the training scripts if models are already in place."
+else
+  echo "FAILED: (none)"
+fi
+echo "============================================"
+echo
+
+# ---------- keep alive for SSH ----------
+echo "[BOOTSTRAP] complete — keeping container alive for SSH."
 tail -f /dev/null
-
