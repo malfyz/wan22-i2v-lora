@@ -5,6 +5,7 @@
 # - Imports dataset zip (with .txt captions) non-interactively
 # - Creates high/low training scripts wired for LoRA on WAN DiT
 # - Uses SDPA (no xformers), fp16, gradient checkpointing, offload, allocator fix
+# - Saves every 10 epochs; keeps 1 trainer state; auto-resumes if state exists
 
 set -u -o pipefail
 echo "[BOOTSTRAP] start $(date -Iseconds)"
@@ -21,7 +22,7 @@ mkdir -p "$MODELS_DIR"/{diffusion_models,text_encoders,vae} \
          "$DATASETS_DIR/character_images" "$OUT_DIR" "$CACHE_DIR" \
          "$SCRIPTS_DIR" "$CONFIGS_DIR" "$LOGS_DIR"
 
-# dataset zip (you can override via env)
+# dataset zip (override with: DATASET_ZIP_URL=...)
 DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://rsvp.ninja/wan_lora.zip}"
 
 # HF model repos
@@ -117,7 +118,7 @@ if curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$TMP" "$DATASET_ZIP
   rsync -a --delete "$UNPACK"/ "$DATASETS_DIR/character_images"/ && ok dataset || ko dataset
 else ko dataset; fi
 
-# ---------- TOML config (expects .txt captions) ----------
+# ---------- TOML config (expects .txt captions; repeats=2) ----------
 CONF="$CONFIGS_DIR/dataset_i2v.toml"
 cat > "$CONF" <<'TOML'
 [general]
@@ -130,7 +131,7 @@ caption_extension = ".txt"
 [[datasets]]
 image_directory = "/workspace/datasets/character_images"
 cache_directory = "/workspace/cache/i2v"
-num_repeats = 1
+num_repeats = 2
 TOML
 sed -i 's/\r$//' "$CONF"
 ok dataset_config
@@ -151,7 +152,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 M=/workspace/models
 CONF=/workspace/configs/dataset_i2v.toml
+OUTDIR=/workspace/outputs/i2v_high
 LOG=/workspace/logs/train_high.log
+mkdir -p "$OUTDIR"
 
 # (1) cache latents
 python -u -m musubi_tuner.wan_cache_latents \
@@ -165,7 +168,12 @@ python -u -m musubi_tuner.wan_cache_text_encoder_outputs \
   --t5 "$M/text_encoders/models_t5_umt5-xxl-enc-bf16.pth" \
   --device cuda --batch_size 4 | tee -a "$LOG"
 
-# (3) train LoRA (high-noise)
+# (3) train LoRA (high-noise), save every 10 epochs, keep 1 trainer state, resume if present
+RESUME_OPT=()
+if compgen -G "$OUTDIR/*.state" >/dev/null; then
+  RESUME_OPT=(--resume "$OUTDIR")
+fi
+
 accelerate launch -m musubi_tuner.wan_train_network \
   --task i2v-A14B \
   --dataset_config "$CONF" \
@@ -173,17 +181,19 @@ accelerate launch -m musubi_tuner.wan_train_network \
   --vae "$M/vae/wan_2.1_vae.safetensors" \
   --t5 "$M/text_encoders/models_t5_umt5-xxl-enc-bf16.pth" \
   --network_module networks.lora_wan \
-  --network_dim 32 --network_alpha 32 \
+  --network_dim 128 --network_alpha 32 \
   --learning_rate 1e-4 \
   --optimizer_type AdamW --optimizer_args weight_decay=0.01 betas=0.9,0.95 eps=1e-8 \
   --max_grad_norm 1.0 \
   --gradient_accumulation_steps 4 \
-  --max_train_epochs 30 \
+  --max_train_epochs 40 \
+  --save_every_n_epochs 10 \
+  --save_state --save_state_on_train_end --save_last_n_epochs_state 1 \
   --mixed_precision fp16 \
   --gradient_checkpointing \
   --offload_inactive_dit \
-  --output_dir /workspace/outputs/i2v_high --output_name i2v_high \
-  --sdpa | tee -a "$LOG"
+  --output_dir "$OUTDIR" --output_name i2v_high \
+  --sdpa "${RESUME_OPT[@]}" | tee -a "$LOG"
 BASH
 chmod +x "$SCRIPTS_DIR/train_i2v_high.sh" && ok script_high || ko script_high
 
@@ -197,7 +207,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 M=/workspace/models
 CONF=/workspace/configs/dataset_i2v.toml
+OUTDIR=/workspace/outputs/i2v_low
 LOG=/workspace/logs/train_low.log
+mkdir -p "$OUTDIR"
 
 python -u -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
@@ -209,6 +221,11 @@ python -u -m musubi_tuner.wan_cache_text_encoder_outputs \
   --t5 "$M/text_encoders/models_t5_umt5-xxl-enc-bf16.pth" \
   --device cuda --batch_size 4 | tee -a "$LOG"
 
+RESUME_OPT=()
+if compgen -G "$OUTDIR/*.state" >/dev/null; then
+  RESUME_OPT=(--resume "$OUTDIR")
+fi
+
 accelerate launch -m musubi_tuner.wan_train_network \
   --task i2v-A14B \
   --dataset_config "$CONF" \
@@ -216,22 +233,24 @@ accelerate launch -m musubi_tuner.wan_train_network \
   --vae "$M/vae/wan_2.1_vae.safetensors" \
   --t5 "$M/text_encoders/models_t5_umt5-xxl-enc-bf16.pth" \
   --network_module networks.lora_wan \
-  --network_dim 32 --network_alpha 32 \
+  --network_dim 128 --network_alpha 32 \
   --learning_rate 5e-5 \
   --optimizer_type AdamW --optimizer_args weight_decay=0.01 betas=0.9,0.95 eps=1e-8 \
   --max_grad_norm 1.0 \
   --gradient_accumulation_steps 4 \
-  --max_train_epochs 30 \
+  --max_train_epochs 40 \
+  --save_every_n_epochs 10 \
+  --save_state --save_state_on_train_end --save_last_n_epochs_state 1 \
   --mixed_precision fp16 \
   --gradient_checkpointing \
   --offload_inactive_dit \
-  --output_dir /workspace/outputs/i2v_low --output_name i2v_low \
-  --sdpa | tee -a "$LOG"
+  --output_dir "$OUTDIR" --output_name i2v_low \
+  --sdpa "${RESUME_OPT[@]}" | tee -a "$LOG"
 BASH
 chmod +x "$SCRIPTS_DIR/train_i2v_low.sh" && ok script_low || ko script_low
 
 echo "[SCRIPTS] ready:"
-ls -la "$SCRIPTS_DIR" | sed -n '1,120p' || true
+ls -la "$SCRIPTS_DIR" | sed -n '1,200p' || true
 
 # ---------- summary ----------
 echo
@@ -240,4 +259,3 @@ echo "[TIME] $(date -Iseconds)"
 [ ${#SUCCEEDED[@]} -gt 0 ] && { echo "Succeeded:"; for s in "${SUCCEEDED[@]}"; do echo "  • $s"; done; } || echo "Succeeded: (none)"
 [ ${#FAILED[@]} -gt 0 ]    && { echo "FAILED (non-fatal):"; for f in "${FAILED[@]}"; do echo "  • $f"; done; } || echo "FAILED: (none)"
 echo "============================================"
-echo
