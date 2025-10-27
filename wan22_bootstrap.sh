@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# WAN 2.2 I2V LoRA bootstrap — final tuned version
-# - Installs musubi-tuner
-# - Installs triton + tries sage-attn
-# - Downloads WAN2.2 i2v (high/low), WAN2.1 VAE, and correct T5 .pth
-# - Imports dataset zip (non-interactive)
-# - Writes dataset TOML (num_repeats=2, captions enabled)
-# - Creates train scripts (network_dim/alpha=64, 50 epochs, save every 10)
-# - Uses fp16, SDPA, gradient checkpointing, offload, allocator fix
+# WAN 2.2 I2V LoRA bootstrap (RunPod-ready)
+# - Installs musubi-tuner + hf_transfer (fast HF pulls)
+# - Downloads WAN 2.2 I2V high/low, WAN 2.1 VAE, and correct T5 (.pth)
+# - Imports dataset zip (expects .txt captions) without nested folder mess
+# - Writes HIGH/LOW training scripts: SDPA, fp16, LoRA rank/alpha=64, 50 epochs, save every 10
+# - No background keep-alive; exits cleanly
 
-set -u -o pipefail
-
+set -euo pipefail
 echo "[BOOTSTRAP] start $(date -Iseconds)"
 
+# ---------- layout ----------
 WORKDIR="${WORKDIR:-/workspace}"
 MODELS_DIR="$WORKDIR/models"
 DATASETS_DIR="$WORKDIR/datasets"
@@ -22,16 +20,14 @@ CONFIGS_DIR="$WORKDIR/configs"
 LOGS_DIR="$WORKDIR/logs"
 
 mkdir -p \
-  "$MODELS_DIR/diffusion_models" \
-  "$MODELS_DIR/text_encoders" \
-  "$MODELS_DIR/vae" \
+  "$MODELS_DIR"/{diffusion_models,text_encoders,vae} \
   "$DATASETS_DIR/character_images" \
   "$OUT_DIR" "$CACHE_DIR" "$SCRIPTS_DIR" "$CONFIGS_DIR" "$LOGS_DIR"
 
 # dataset zip (override with env if needed)
 DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://rsvp.ninja/wan_lora.zip}"
 
-# HF repos
+# HF model repos
 REPACK_REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
 WAN21_REPO="Wan-AI/Wan2.1-I2V-14B-720P"
 
@@ -43,133 +39,81 @@ retry(){ # retry <times> <sleep_base> -- <cmd...>
   local t="$1"; shift; local s="$1"; shift
   if [ "$#" -gt 0 ] && [ "${1:-}" = "--" ]; then shift; fi
   local i=1
-  while :; do
-    "$@" && return 0
-    [ $i -ge "$t" ] && return 1
-    echo "  retry $i/$t: $*"
-    sleep $(( s * i ))
-    i=$((i+1))
-  done
-}
+  while :; do "$@" && return 0; [ $i -ge "$t" ] && return 1
+    echo "  retry $i/$t: $*"; sleep $((s*i)); i=$((i+1)); done; }
 
 # ---------- system basics ----------
-step=sys_pkgs
 if command -v apt-get >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive retry 3 5 -- apt-get update -y && \
-  retry 3 5 -- apt-get install -y --no-install-recommends git curl unzip rsync && ok $step || ko $step
+  export DEBIAN_FRONTEND=noninteractive
+  retry 3 5 -- apt-get update -y
+  retry 3 5 -- apt-get install -y --no-install-recommends git curl unzip rsync
+  ok sys_pkgs || ko sys_pkgs
 else
-  ok $step
+  ok sys_pkgs
 fi
 
-step=pip_upgrade
-retry 3 5 -- python -m pip install --upgrade pip wheel setuptools >/dev/null 2>&1 && ok $step || ko $step
+retry 3 5 -- python -m pip install -U pip wheel setuptools
+ok pip || ko pip
 
-# ---------- HF CLI ----------
-step=hf_cli
-if command -v hf >/dev/null 2>&1; then HF=hf
-elif command -v huggingface-cli >/dev/null 2>&1; then HF=huggingface-cli
+# ---------- HF CLI + fast transfer ----------
+if command -v hf >/dev/null 2>&1; then
+  HF=hf
+elif command -v huggingface-cli >/dev/null 2>&1; then
+  HF=huggingface-cli
 else
-  if retry 3 5 -- python -m pip install --no-cache-dir "huggingface_hub[cli]==0.25.2"; then
-    HF=huggingface-cli
-  else
-    HF=""
-  fi
+  retry 3 5 -- python -m pip install --no-cache-dir "huggingface_hub[cli]==0.25.2"
+  HF=huggingface-cli
 fi
-if [ -n "${HF:-}" ]; then
-  export HF_HUB_ENABLE_HF_TRANSFER=1
-  ok $step
-else
-  ko $step
-fi
+# Fast transport
+retry 3 5 -- python -m pip install --no-cache-dir hf_transfer==0.1.8
+export HF_HUB_ENABLE_HF_TRANSFER=1
+ok hf_cli || ko hf_cli
 
 # ---------- musubi-tuner ----------
-step=musubi
 if [ ! -d /opt/musubi-tuner ]; then
-  if retry 3 5 -- git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner && \
-     retry 3 5 -- python -m pip install --no-cache-dir -e /opt/musubi-tuner; then
-    ok $step
-  else
-    ko $step
-  fi
-else
-  if python -m pip install --no-cache-dir -e /opt/musubi-tuner >/dev/null 2>&1; then ok $step; else ko $step; fi
+  retry 3 5 -- git clone https://github.com/kohya-ss/musubi-tuner.git /opt/musubi-tuner
 fi
+retry 3 5 -- python -m pip install --no-cache-dir -e /opt/musubi-tuner
+ok musubi || ko musubi
 
-# ---------- optional speedups: triton + sage-attn ----------
-step=triton_sage
-echo "[SETUP] attempting to install triton + sage-attn (best-effort)"
-TRIED_SAGE=0
-if retry 2 5 -- python -m pip install --no-cache-dir "triton"; then
-  echo "  - triton installed"
-else
-  echo "  - triton install failed (continuing)"
-fi
-
-# attempt several likely sage-attn package names (best-effort)
-for pkg in "sage-attn" "sageattention" "sage-attention" "sage_attention"; do
-  TRIED_SAGE=$((TRIED_SAGE+1))
-  if python -m pip install --no-cache-dir "$pkg" >/dev/null 2>&1; then
-    echo "  - installed $pkg"
-    SAGE_PKG="$pkg"
-    ok $step
-    break
-  fi
-done
-[ -n "${SAGE_PKG:-}" ] || echo "  - sage-attn install attempts failed (continuing without)"
-
-# ---------- helper: download HF file robustly ----------
+# ---------- models (single-pass, no duplicates) ----------
 dl_one(){ # dl_one <repo> <relpath> <destdir>
-  local repo="$1"; local rel="$2"; local out="$3"
+  local repo="$1" rel="$2" out="$3"
   mkdir -p "$out"
-  local base
-  base="$(basename "$rel")"
+  local base="$(basename "$rel")"
   local target="$out/$base"
-
   if [ -f "$target" ]; then
     echo "  - exists: $target"
     return 0
   fi
-
   echo "  - fetching $repo/$rel → $out"
-  if [ -n "${HF:-}" ]; then
-    if [ -n "${HF_TOKEN:-}" ]; then
-      retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --token "$HF_TOKEN" --resume || return 1
-    else
-      retry 5 5 -- $HF download "$repo" "$rel" --local-dir "$out" --resume || return 1
-    fi
-  else
-    # fallback to curl (public assets only)
-    local url="https://huggingface.co/${repo}/resolve/main/${rel}"
-    retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$target" "$url" || return 1
-  fi
-
-  # normalize split_files layout in case hf CLI wrote nested
+  # huggingface-cli handles subfolders and resumes
+  $HF download "$repo" "$rel" \
+      --local-dir "$out" \
+      --local-dir-use-symlinks False \
+      --resume ${HF_TOKEN:+--token "$HF_TOKEN"}
+  # ensure file is in place
   if [ ! -f "$target" ]; then
-    local found
-    found="$(find "$out" -type f -name "$base" 2>/dev/null | head -n1 || true)"
-    if [ -n "$found" ]; then
-      mv -f "$found" "$target" || true
-      find "$out" -type d -empty -delete || true
-    fi
+    local found="$(find "$out" -type f -name "$base" | head -n1 || true)"
+    [ -n "$found" ] && mv -f "$found" "$target"
   fi
-
-  [ -f "$target" ] || return 1
+  [ -f "$target" ] || { echo "  ! missing after download: $target"; return 1; }
   echo "  - ready: $target"
 }
 
-# ---------- models ----------
 echo "[MODELS] downloading…"
+# DiT (2.2 high/low)
 dl_one "$REPACK_REPO" "split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors" "$MODELS_DIR/diffusion_models" && ok i2v_high || ko i2v_high
 dl_one "$REPACK_REPO" "split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors"  "$MODELS_DIR/diffusion_models" && ok i2v_low  || ko i2v_low
+# VAE (2.1 ONLY — works with musubi I2V)
 dl_one "$REPACK_REPO" "split_files/vae/wan_2.1_vae.safetensors"                                  "$MODELS_DIR/vae"             && ok vae21   || ko vae21
-# (leave wan2.2_vae optional)
-dl_one "$REPACK_REPO" "split_files/vae/wan2.2_vae.safetensors"                                    "$MODELS_DIR/vae"             && ok vae22   || echo "[MODELS] wan2.2 vae skipped/optional"
-dl_one "$WAN21_REPO"  "models_t5_umt5-xxl-enc-bf16.pth"                                           "$MODELS_DIR/text_encoders"   && ok t5pth   || ko t5pth
+# Correct T5 encoder .pth
+dl_one "$WAN21_REPO"  "models_t5_umt5-xxl-enc-bf16.pth"                                         "$MODELS_DIR/text_encoders"   && ok t5pth   || ko t5pth
 
 echo "[MODELS] present:"
 find "$MODELS_DIR" -maxdepth 3 -type f \( -name "*.safetensors" -o -name "*.pth" \) -printf "  %p\n" || true
 
-# ---------- accelerate config (fp16) ----------
+# ---------- accelerate (fp16) ----------
 ACC="$HOME/.cache/huggingface/accelerate/default_config.yaml"
 mkdir -p "$(dirname "$ACC")"
 cat > "$ACC" <<'YAML'
@@ -183,25 +127,34 @@ main_training_function: main
 YAML
 ok accelerate
 
-# ---------- dataset import (overwrite) ----------
-step=dataset
+# ---------- dataset import (clean, non-nested) ----------
 TMP=/tmp/wan_lora.$$
 UNPACK=/tmp/dsunpack
-rm -rf "$UNPACK" "$DATASETS_DIR/character_images"
-mkdir -p "$UNPACK" "$DATASETS_DIR/character_images"
+rm -rf "$UNPACK"
+mkdir -p "$UNPACK"
+
 echo "[DATASET] downloading $DATASET_ZIP_URL"
-if retry 5 5 -- curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$TMP" "$DATASET_ZIP_URL" && \
-   (unzip -oq "$TMP" -d "$UNPACK" || tar -xof "$TMP" -C "$UNPACK"); then
-  rsync -a --delete "$UNPACK"/ "$DATASETS_DIR/character_images"/ && ok $step || ko $step
+if curl -fL --retry 5 --retry-all-errors --retry-delay 5 -o "$TMP" "$DATASET_ZIP_URL"; then
+  (unzip -oq "$TMP" -d "$UNPACK" || tar -xof "$TMP" -C "$UNPACK") || true
+  # find the real content root (handles zips with a single top-level dir)
+  SRC="$UNPACK"
+  if [ "$(find "$UNPACK" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && \
+     [ "$(find "$UNPACK" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 0 ]; then
+    SRC="$(find "$UNPACK" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  fi
+  rm -rf "$DATASETS_DIR/character_images"
+  mkdir -p "$DATASETS_DIR/character_images"
+  rsync -a --delete "$SRC"/ "$DATASETS_DIR/character_images"/
+  ok dataset || ko dataset
 else
-  ko $step
+  ko dataset
 fi
 
-# ---------- dataset TOML (captions expected) ----------
+# ---------- TOML config (expects .txt captions) ----------
 CONF="$CONFIGS_DIR/dataset_i2v.toml"
 cat > "$CONF" <<'TOML'
 [general]
-resolution = [1280, 720]         # lower to [960,544] if OOM
+resolution = [1280, 720]         # lower to [960, 544] if OOM
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = false
@@ -209,24 +162,21 @@ caption_extension = ".txt"
 
 [[datasets]]
 image_directory = "/workspace/datasets/character_images"
-cache_directory = "/workspace/cache/i2v"
+cache_directory  = "/workspace/cache/i2v"
 num_repeats = 2
 TOML
 sed -i 's/\r$//' "$CONF"
 ok dataset_config
 
-# ---------- env flags to avoid CUDA/NCCL hiccups ----------
+# ---------- env flags ----------
 export CUDA_MODULE_LOADING=LAZY
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# ---------- training scripts ----------
-# Notes:
-# - network_dim/alpha = 64 (tuned)
-# - epochs = 50 ; save_every_n_epochs = 10
-# - caption_dropout via --network_args caption_dropout=0.05 (5%)
-# - using sdpa (--sdpa) and --sage_attn switch to enable sage attention (if installed)
+# ---------- training scripts (HIGH / LOW) ----------
+# SDPA only (no --sage_attn), LoRA rank/alpha=64, 50 epochs, save every 10, caption_dropout=0.05
+
 cat > "$SCRIPTS_DIR/train_i2v_high.sh" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -239,21 +189,19 @@ M=/workspace/models
 CONF=/workspace/configs/dataset_i2v.toml
 LOG=/workspace/logs/train_high.log
 
-mkdir -p /workspace/outputs/i2v_high /workspace/cache/i2v
-
-# cache latents (i2v)
+# 1) cache latents
 python -u -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
   --vae "$M/vae/wan_2.1_vae.safetensors" \
-  --i2v --device cuda --batch_size 2 --num_workers 2 | tee "$LOG"
+  --i2v --device cuda --batch_size 2 --num_workers 1 | tee "$LOG"
 
-# cache T5 outputs
+# 2) cache T5 outputs
 python -u -m musubi_tuner.wan_cache_text_encoder_outputs \
   --dataset_config "$CONF" \
   --t5 "$M/text_encoders/models_t5_umt5-xxl-enc-bf16.pth" \
   --device cuda --batch_size 4 | tee -a "$LOG"
 
-# train LoRA (high noise)
+# 3) train LoRA (high-noise)
 accelerate launch -m musubi_tuner.wan_train_network \
   --task i2v-A14B \
   --dataset_config "$CONF" \
@@ -273,7 +221,7 @@ accelerate launch -m musubi_tuner.wan_train_network \
   --offload_inactive_dit \
   --network_args caption_dropout=0.05 \
   --output_dir /workspace/outputs/i2v_high --output_name i2v_high \
-  --sdpa --sage_attn | tee -a "$LOG"
+  --sdpa | tee -a "$LOG"
 BASH
 chmod +x "$SCRIPTS_DIR/train_i2v_high.sh" && ok script_high || ko script_high
 
@@ -289,18 +237,19 @@ M=/workspace/models
 CONF=/workspace/configs/dataset_i2v.toml
 LOG=/workspace/logs/train_low.log
 
-mkdir -p /workspace/outputs/i2v_low /workspace/cache/i2v
-
+# 1) cache latents
 python -u -m musubi_tuner.wan_cache_latents \
   --dataset_config "$CONF" \
   --vae "$M/vae/wan_2.1_vae.safetensors" \
-  --i2v --device cuda --batch_size 2 --num_workers 2 | tee "$LOG"
+  --i2v --device cuda --batch_size 2 --num_workers 1 | tee "$LOG"
 
+# 2) cache T5 outputs
 python -u -m musubi_tuner.wan_cache_text_encoder_outputs \
   --dataset_config "$CONF" \
   --t5 "$M/text_encoders/models_t5_umt5-xxl-enc-bf16.pth" \
   --device cuda --batch_size 4 | tee -a "$LOG"
 
+# 3) train LoRA (low-noise)
 accelerate launch -m musubi_tuner.wan_train_network \
   --task i2v-A14B \
   --dataset_config "$CONF" \
@@ -320,32 +269,17 @@ accelerate launch -m musubi_tuner.wan_train_network \
   --offload_inactive_dit \
   --network_args caption_dropout=0.05 \
   --output_dir /workspace/outputs/i2v_low --output_name i2v_low \
-  --sdpa --sage_attn | tee -a "$LOG"
+  --sdpa | tee -a "$LOG"
 BASH
 chmod +x "$SCRIPTS_DIR/train_i2v_low.sh" && ok script_low || ko script_low
 
 echo "[SCRIPTS] ready:"
-ls -la "$SCRIPTS_DIR" | sed -n '1,200p' || true
+ls -la "$SCRIPTS_DIR" | sed -n '1,120p' || true
 
 # ---------- summary ----------
 echo
 echo "================== SUMMARY =================="
 echo "[TIME] $(date -Iseconds)"
-if [ "${#SUCCEEDED[@]}" -gt 0 ]; then
-  echo "Succeeded:"
-  for s in "${SUCCEEDED[@]}"; do echo "  • $s"; done
-else
-  echo "Succeeded: (none)"
-fi
-
-if [ "${#FAILED[@]}" -gt 0 ]; then
-  echo "FAILED (non-fatal):"
-  for f in "${FAILED[@]}"; do echo "  • $f"; done
-else
-  echo "FAILED: (none)"
-fi
+[ ${#SUCCEEDED[@]} -gt 0 ] && { echo "Succeeded:"; for s in "${SUCCEEDED[@]}"; do echo "  • $s"; done; } || echo "Succeeded: (none)"
+[ ${#FAILED[@]} -gt 0 ]    && { echo "FAILED (non-fatal):"; for f in "${FAILED[@]}"; do echo "  • $f"; done; } || echo "FAILED: (none)"
 echo "============================================"
-echo
-
-# exit normally (no keep-alive)
-exit 0
