@@ -25,7 +25,7 @@ mkdir -p \
   "$OUT_DIR" "$CACHE_DIR" "$SCRIPTS_DIR" "$CONFIGS_DIR" "$LOGS_DIR"
 
 # dataset zip (override with env if needed)
-DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://rsvp.ninja/wan_lora.zip}"
+DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://MYURL/wan_lora.zip}"
 
 # HF model repos
 REPACK_REPO="Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
